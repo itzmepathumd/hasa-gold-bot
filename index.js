@@ -4,6 +4,7 @@ const { Telegraf, Markup, session } = require("telegraf");
 const fs = require("fs");
 const crypto = require("crypto");
 const catalog = require("./catalog");
+const anim = require("./anim");
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_ID = Number(process.env.ADMIN_ID);
@@ -28,6 +29,18 @@ bot.use(async (ctx, next) => {
     ctx.from?.id,
     ctx.message?.text || ctx.callbackQuery?.data || "other"
   );
+
+  // Show the real "bot is typing..." indicator for anything that is not an
+  // inline button press (those get their own spinner edit).
+  if (!ctx.callbackQuery) {
+    const action = ctx.message?.photo
+      ? "upload_photo"
+      : ctx.message?.document
+        ? "upload_document"
+        : "typing";
+
+    anim.typing(ctx, { action, duration: 1200 });
+  }
 
   await next();
 });
@@ -135,19 +148,100 @@ function esc(value) {
 }
 
 const STATUS_META = {
-  pending_payment: { label: "🕒 Awaiting Payment", icon: "🕒" },
-  pending_approval: { label: "🔍 Verifying Proof", icon: "🔍" },
-  approved: { label: "✅ Approved", icon: "✅" },
-  rejected: { label: "❌ Rejected", icon: "❌" },
+  pending_payment: { label: "🕒 Awaiting Payment" },
+  pending_approval: { label: "🔍 Verifying Proof" },
+  approved: { label: "✅ Approved" },
+  rejected: { label: "❌ Rejected" },
+  cancelled: { label: "🚫 Cancelled" },
 };
 
 function statusBadge(status) {
   const meta = STATUS_META[status] || {
     label: "📌 " + status,
-    icon: "📌",
   };
 
-  return `${meta.icon} ${meta.label}`;
+  return `${meta.label}`;
+}
+
+/*
+|--------------------------------------------------------------------------
+| CUSTOMER NOTIFICATION
+|--------------------------------------------------------------------------
+| Pushes a result to a customer with a small staged reveal so the moment
+| feels deliberate rather than a wall of text appearing instantly.
+*/
+async function notifyCustomer(order, { title, body }) {
+  const chatId = order.userId;
+
+  const text =
+    `${title}\n\n` +
+    `━━━━━━━━━━━━━━━━━━\n\n` +
+    `🧾 *ORDER ID*\n\`${esc(order.id)}\`\n\n` +
+    `🎮 *GAME*\n${esc(order.gameName || "Blood Strike")}\n\n` +
+    `📦 *PACKAGE*\n${esc(order.productName)}\n\n` +
+    `🆔 *${esc(order.idLabel || "PLAYER ID")}*\n\`${esc(order.playerId)}\`\n\n` +
+    `💰 *AMOUNT*\nLKR ${Number(order.price).toLocaleString()}\n\n` +
+    `━━━━━━━━━━━━━━━━━━\n\n` +
+    `${body}`;
+
+  let messageId = null;
+
+  try {
+    const sent = await bot.telegram.sendMessage(chatId, anim.SPINNER[0], {
+      parse_mode: "Markdown",
+    });
+    messageId = sent.message_id;
+  } catch {
+    // Customer may have blocked the bot; fall back to one direct send.
+    try {
+      await bot.telegram.sendMessage(chatId, text, {
+        parse_mode: "Markdown",
+      });
+    } catch {
+      /* nothing we can do */
+    }
+    return;
+  }
+
+  const target = { telegram: bot.telegram, chat: { id: chatId } };
+
+  await anim.sleep(420);
+
+  await anim.safeEdit(target, messageId, `✅ *Order update*\n\n${text}`, {
+    parse_mode: "Markdown",
+  });
+
+  await anim.sleep(500);
+
+  await anim.safeEdit(target, messageId, `🎉 *Order update*\n\n${text}`, {
+    parse_mode: "Markdown",
+  });
+}
+
+/*
+|--------------------------------------------------------------------------
+| BUTTON REVEAL
+|--------------------------------------------------------------------------
+| Rewrites the tapped button message into a brief spinner, then into the
+| destination screen. Gives inline navigation a sense of motion.
+*/
+async function revealEdit(ctx, label, text, extra) {
+  const frames = 2;
+
+  for (let i = 0; i < frames; i++) {
+    try {
+      await ctx.editMessageText(`${anim.SPINNER[i % anim.SPINNER.length]} *${label}*`, {
+        parse_mode: "Markdown",
+      });
+    } catch {
+      // "not modified" or stale message: just show the screen below.
+      break;
+    }
+
+    await anim.sleep(300);
+  }
+
+  return anim.safeEdit(ctx, undefined, text, extra);
 }
 
 /*
@@ -447,7 +541,7 @@ async function showGames(ctx, isEdit) {
   }
 
   if (isEdit) {
-    return ctx.editMessageText(text, {
+    return revealEdit(ctx, "Loading games", text, {
       parse_mode: "Markdown",
       ...gamesMenu(),
     });
@@ -530,7 +624,9 @@ bot.action(/^pick_(.+)~(.+)$/, async (ctx) => {
   ctx.session.selectedProduct = pkg.id;
   ctx.session.waitingForPlayerId = true;
 
-  await ctx.reply(
+  await revealEdit(
+    ctx,
+    "Preparing your package",
     `${game.emoji} *${pkg.name}*\n\n` +
       `━━━━━━━━━━━━━━━━━━\n\n` +
       `🎮 *GAME*\n${game.name}\n\n` +
@@ -545,10 +641,7 @@ bot.action(/^pick_(.+)~(.+)$/, async (ctx) => {
       parse_mode: "Markdown",
       ...Markup.inlineKeyboard([
         [
-          Markup.button.callback(
-            LABEL.products,
-            `game_${game.id}`
-          ),
+          Markup.button.callback(LABEL.products, `game_${game.id}`),
         ],
         [Markup.button.callback(LABEL.cancel, "cancel_order")],
       ]),
@@ -1092,7 +1185,11 @@ bot.action("confirm_order", async (ctx) => {
   ctx.session.orderId = order.id;
   ctx.session.waitingForPayment = true;
 
-  await ctx.reply(
+  // Confirm button was tapped on the order-summary message: rewrite that
+  // message into the payment screen so the flow feels continuous.
+  await revealEdit(
+    ctx,
+    "Creating your order",
     `💳 *PAYMENT REQUIRED*\n\n` +
       `━━━━━━━━━━━━━━━━━━\n\n` +
       `🧾 *ORDER ID*\n\`${esc(order.id)}\`\n\n` +
@@ -1113,16 +1210,10 @@ bot.action("confirm_order", async (ctx) => {
       parse_mode: "Markdown",
       ...Markup.inlineKeyboard([
         [
-          Markup.button.callback(
-            "📸  I HAVE PAID",
-            "payment_done"
-          ),
+          Markup.button.callback("📸  I HAVE PAID", "payment_done"),
         ],
         [
-          Markup.button.callback(
-            "❌  CANCEL ORDER",
-            "cancel_order"
-          ),
+          Markup.button.callback("❌  CANCEL ORDER", "cancel_order"),
         ],
       ]),
     }
@@ -1208,58 +1299,45 @@ Status: ${statusBadge(order.status)}`
   saveOrders(orders);
 
   ctx.session.waitingForPayment = false;
-              await ctx.reply(
-  `📸 *PAYMENT PROOF RECEIVED*
 
-━━━━━━━━━━━━━━━━━━
-
-🧾 *ORDER ID*
-${esc(order.id)}
-
-🎮 *GAME*
-${esc(order.gameName || "Blood Strike")}
-
-📦 *PRODUCT*
-${esc(order.productName)}
-
-💰 *AMOUNT*
-LKR ${order.price.toLocaleString()}
-
-━━━━━━━━━━━━━━━━━━
-
-⏳ *STATUS*
-Pending Admin Approval
-
-🔐 Your payment screenshot has been
-received successfully.
-
-⚡ Please wait while our team verifies
-your payment.
-
-📩 You will receive a notification
-once your order has been reviewed.
-
-━━━━━━━━━━━━━━━━━━
-
-✨ *HASA GOLD STORE*`,
-  {
-    parse_mode: "Markdown",
-    ...Markup.inlineKeyboard([
-      [
-        Markup.button.callback(
-          "📦 My Orders",
-          "my_orders"
-        ),
-      ],
-      [
-        Markup.button.callback(
-          "🏠 Home",
-          "home"
-        ),
-      ],
-    ]),
-  }
-);
+  await anim.stages(ctx, {
+    title: "Submitting your payment proof",
+    steps: [
+      "Screenshot received",
+      "Reading payment details",
+      "Saving receipt",
+      "Sending to store admin",
+    ],
+    final:
+      `📸 *PAYMENT PROOF SUBMITTED*\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `🧾 *ORDER ID*\n\`${esc(order.id)}\`\n\n` +
+      `🎮 *GAME*\n${esc(order.gameName || "Blood Strike")}\n\n` +
+      `📦 *PACKAGE*\n${esc(order.productName)}\n\n` +
+      `💰 *AMOUNT*\nLKR ${order.price.toLocaleString()}\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `⏳ *STATUS*\n${statusBadge("pending_approval")}\n\n` +
+      `🔐 Your payment screenshot has been\n` +
+      `received successfully.\n\n` +
+      `⚡ Please wait while our team verifies\n` +
+      `your payment.\n\n` +
+      `📩 You will receive a notification\n` +
+      `once your order has been reviewed.\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `✨ *HASA GOLD STORE*`,
+    extra: {
+      parse_mode: "Markdown",
+      ...Markup.inlineKeyboard([
+        [
+          Markup.button.callback("📦 My Orders", "my_orders"),
+        ],
+        [
+          Markup.button.callback("🏠 Home", "home"),
+        ],
+      ]),
+    },
+    frame: 800,
+  });
 
   /*
   |--------------------------------------------------------------------------
@@ -1370,6 +1448,7 @@ Status: ${statusBadge(order.status)}`
 
   saveOrders(orders);
 
+  // Edit the admin's message in place.
   await ctx.editMessageCaption(
     `✅ ORDER APPROVED
 
@@ -1396,33 +1475,14 @@ Status:
 ✅ APPROVED`
   );
 
-  await bot.telegram.sendMessage(
-    order.userId,
-
-    `✅ PAYMENT APPROVED!
-
-🧾 Order:
-${esc(order.id)}
-
-🎮 ${esc(order.gameName || "Blood Strike")}
-
-📦 Product:
-${esc(order.productName)}
-
-🆔 Player ID:
-${esc(order.playerId)}
-
-💰 Amount:
-LKR ${order.price.toLocaleString()}
-
-━━━━━━━━━━━━━━
-
-✅ Your payment has been approved.
-
-🚀 Your top-up will now be processed.
-
-Thank you for using ${STORE_NAME}!`
-  );
+  // Customer gets a staged notification.
+  await notifyCustomer(order, {
+    title: "🎉 PAYMENT APPROVED!",
+    body:
+      `✅ Your payment has been approved.\n\n` +
+      `🚀 Your top-up will now be processed.\n\n` +
+      `Thank you for using ${STORE_NAME}!`,
+  });
 });
 
 /*
@@ -1495,21 +1555,12 @@ Status:
 ❌ REJECTED`
   );
 
-  await bot.telegram.sendMessage(
-    order.userId,
-
-    `❌ PAYMENT REJECTED
-
-🧾 Order:
-${esc(order.id)}
-
-📦 Product:
-${esc(order.productName)}
-
-Your payment proof was not approved.
-
-If you believe this was a mistake, please contact ${STORE_NAME}.`
-  );
+  await notifyCustomer(order, {
+    title: "❌ PAYMENT REJECTED",
+    body:
+      `Your payment proof was not approved.\n\n` +
+      `If you believe this was a mistake, please contact ${STORE_NAME}.`,
+  });
 });
 
 /*

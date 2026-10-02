@@ -39,7 +39,7 @@ bot.use(async (ctx, next) => {
         ? "upload_document"
         : "typing";
 
-    anim.typing(ctx, { action, duration: 1200 });
+    anim.typing(ctx, { action, duration: 2000 });
   }
 
   await next();
@@ -167,55 +167,10 @@ function statusBadge(status) {
 |--------------------------------------------------------------------------
 | CUSTOMER NOTIFICATION
 |--------------------------------------------------------------------------
-| Pushes a result to a customer with a small staged reveal so the moment
-| feels deliberate rather than a wall of text appearing instantly.
+| Pushes a result to a customer with a staged reveal.
 */
 async function notifyCustomer(order, { title, body }) {
-  const chatId = order.userId;
-
-  const text =
-    `${title}\n\n` +
-    `━━━━━━━━━━━━━━━━━━\n\n` +
-    `🧾 *ORDER ID*\n\`${esc(order.id)}\`\n\n` +
-    `🎮 *GAME*\n${esc(order.gameName || "Blood Strike")}\n\n` +
-    `📦 *PACKAGE*\n${esc(order.productName)}\n\n` +
-    `🆔 *${esc(order.idLabel || "PLAYER ID")}*\n\`${esc(order.playerId)}\`\n\n` +
-    `💰 *AMOUNT*\nLKR ${Number(order.price).toLocaleString()}\n\n` +
-    `━━━━━━━━━━━━━━━━━━\n\n` +
-    `${body}`;
-
-  let messageId = null;
-
-  try {
-    const sent = await bot.telegram.sendMessage(chatId, anim.SPINNER[0], {
-      parse_mode: "Markdown",
-    });
-    messageId = sent.message_id;
-  } catch {
-    // Customer may have blocked the bot; fall back to one direct send.
-    try {
-      await bot.telegram.sendMessage(chatId, text, {
-        parse_mode: "Markdown",
-      });
-    } catch {
-      /* nothing we can do */
-    }
-    return;
-  }
-
-  const target = { telegram: bot.telegram, chat: { id: chatId } };
-
-  await anim.sleep(420);
-
-  await anim.safeEdit(target, messageId, `✅ *Order update*\n\n${text}`, {
-    parse_mode: "Markdown",
-  });
-
-  await anim.sleep(500);
-
-  await anim.safeEdit(target, messageId, `🎉 *Order update*\n\n${text}`, {
-    parse_mode: "Markdown",
-  });
+  return anim.notifyCustomer(bot, order, { title, body });
 }
 
 /*
@@ -225,25 +180,6 @@ async function notifyCustomer(order, { title, body }) {
 | Rewrites the tapped button message into a brief spinner, then into the
 | destination screen. Gives inline navigation a sense of motion.
 */
-async function revealEdit(ctx, label, text, extra) {
-  const frames = 2;
-
-  for (let i = 0; i < frames; i++) {
-    try {
-      await ctx.editMessageText(`${anim.SPINNER[i % anim.SPINNER.length]} *${label}*`, {
-        parse_mode: "Markdown",
-      });
-    } catch {
-      // "not modified" or stale message: just show the screen below.
-      break;
-    }
-
-    await anim.sleep(300);
-  }
-
-  return anim.safeEdit(ctx, undefined, text, extra);
-}
-
 /*
 |--------------------------------------------------------------------------
 | UI TEXT
@@ -541,10 +477,10 @@ async function showGames(ctx, isEdit) {
   }
 
   if (isEdit) {
-    return revealEdit(ctx, "Loading games", text, {
+    return anim.revealEdit(ctx, "Loading games", text, {
       parse_mode: "Markdown",
       ...gamesMenu(),
-    });
+    }, { spinner: "search", frames: 3, delay: 300 });
   }
 
   return ctx.reply(text, {
@@ -624,7 +560,7 @@ bot.action(/^pick_(.+)~(.+)$/, async (ctx) => {
   ctx.session.selectedProduct = pkg.id;
   ctx.session.waitingForPlayerId = true;
 
-  await revealEdit(
+  await anim.revealEdit(
     ctx,
     "Preparing your package",
     `${game.emoji} *${pkg.name}*\n\n` +
@@ -645,7 +581,8 @@ bot.action(/^pick_(.+)~(.+)$/, async (ctx) => {
         ],
         [Markup.button.callback(LABEL.cancel, "cancel_order")],
       ]),
-    }
+    },
+    { spinner: "package", frames: 3, delay: 300 }
   );
 });
 
@@ -1187,7 +1124,7 @@ bot.action("confirm_order", async (ctx) => {
 
   // Confirm button was tapped on the order-summary message: rewrite that
   // message into the payment screen so the flow feels continuous.
-  await revealEdit(
+  await anim.revealEdit(
     ctx,
     "Creating your order",
     `💳 *PAYMENT REQUIRED*\n\n` +
@@ -1216,7 +1153,8 @@ bot.action("confirm_order", async (ctx) => {
           Markup.button.callback("❌  CANCEL ORDER", "cancel_order"),
         ],
       ]),
-    }
+    },
+    { spinner: "gear", frames: 3, delay: 300 }
   );
 });
 
@@ -1336,7 +1274,11 @@ Status: ${statusBadge(order.status)}`
         ],
       ]),
     },
-    frame: 800,
+    frame: 900,
+    spinner: "sparkle",
+    barStyle: "round",
+    emoji: "📸",
+    showPercent: true,
   });
 
   /*

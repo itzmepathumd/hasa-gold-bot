@@ -176,6 +176,47 @@ async function notifyCustomer(order, { title, body }) {
 
 /*
 |--------------------------------------------------------------------------
+| ORDER CONFIRMATION HELPER
+|--------------------------------------------------------------------------
+*/
+async function sendOrderConfirmation(ctx, game, pkg, playerId, playerInfo, validationError) {
+  const playerInfoText = playerInfo
+    ? `\n👤 *PLAYER NAME*\n${esc(playerInfo.player_name)}\n\n🌍 *REGION*\n${playerInfo.region || "Global"}\n`
+    : "";
+
+  await ctx.reply(
+    `🧾 *ORDER CONFIRMATION*\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `🎮 *GAME*\n${game.name}\n\n` +
+      `📦 *PACKAGE*\n${pkg.name}\n\n` +
+      `🆔 *${game.idLabel.toUpperCase()}*\n\`${playerId}\`` +
+      `${playerInfoText}` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `💰 *TOTAL*\nLKR ${catalog.formatPrice(pkg.price)}\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `${validationError && validationError.retryable
+        ? "⚠️ *Validation skipped* — service was unavailable. Proceed at your own risk.\n\n"
+        : ""
+      }` +
+      `⚠️ Please check your ${game.idLabel}\n` +
+      `and package before confirming.\n\n` +
+      `👇 *Ready to place your order?*`,
+    {
+      parse_mode: "Markdown",
+      ...Markup.inlineKeyboard([
+        [
+          Markup.button.callback(LABEL.confirm, "confirm_order"),
+        ],
+        [
+          Markup.button.callback(LABEL.cancel, "cancel_order"),
+        ],
+      ]),
+    }
+  );
+}
+
+/*
+|--------------------------------------------------------------------------
 | BUTTON REVEAL
 |--------------------------------------------------------------------------
 | Rewrites the tapped button message into a brief spinner, then into the
@@ -1097,20 +1138,21 @@ bot.on("text", async (ctx, next) => {
     );
   }
 
-  // Validate player with external API if sub_category_id is configured
+  // Validate player with SHOP2TOPUP if sub_category_id is configured
   const subCategoryId = pkg.sub_category_id;
   let playerInfo = null;
   let validationError = null;
 
   if (subCategoryId) {
+    // Show validation animation
     const validationResult = await anim.stages(ctx, {
-      title: "Validating player ID",
+      title: "Checking Player ID",
       steps: [
-        "Connecting to game servers",
+        "Connecting to SHOP2TOPUP",
         "Looking up player profile",
         "Verifying account status",
       ],
-      final: "", // We'll replace with actual result
+      final: "",
       extra: { parse_mode: "Markdown" },
       frame: 800,
       spinner: "search",
@@ -1119,35 +1161,79 @@ bot.on("text", async (ctx, next) => {
       showPercent: true,
     });
 
-    // The animation sent a message; we need to send the actual result
     // Call the validation API
-    const result = await playerValidate.validatePlayer(subCategoryId, playerId, pkg.requirements || {});
+    const result = await playerValidate.validateShop2TopupPlayer(playerId, pkg);
 
-    if (result.valid) {
-      playerInfo = result.player;
-      // Show success with player info
+    if (result.success) {
+      playerInfo = {
+        player_id: result.playerId,
+        player_name: result.playerName,
+        region: result.region,
+      };
+
+      // Show success with Confirm/Change ID buttons
       await anim.revealEdit(
         ctx,
         "Validation successful",
-        `✅ *PLAYER VALIDATED*\n\n` +
+        `✅ *PLAYER VERIFIED*\n\n` +
           `━━━━━━━━━━━━━━━━━━\n\n` +
-          `🎮 *GAME*\n${game.name}\n\n` +
-          `🆔 *${game.idLabel.toUpperCase()}*\n\`${playerId}\`\n\n` +
-          `👤 *PLAYER NAME*\n${esc(playerInfo.player_name)}\n\n` +
-          `🌍 *REGION*\n${playerInfo.region || "Global"}\n\n` +
+          `🆔 *Player ID:* \`${playerId}\`\n` +
+          `👤 *Player Name:* ${esc(result.playerName)}\n` +
+          `🌍 *Region:* ${result.region || "Global"}\n\n` +
           `━━━━━━━━━━━━━━━━━━\n\n` +
-          `✨ Player verified successfully!`,
+          `Please confirm this is your account.`,
         { parse_mode: "Markdown" },
         { spinner: "check", frames: 3, delay: 200 }
       );
+
+      // Send confirmation buttons as a separate message
+      await ctx.reply(
+        `Ready to proceed?`,
+        {
+          parse_mode: "Markdown",
+          ...Markup.inlineKeyboard([
+            [
+              Markup.button.callback("✅ Confirm", "confirm_player"),
+              Markup.button.callback("✏️ Change ID", "change_player_id"),
+            ],
+          ]),
+        }
+      );
+      return;
     } else {
       validationError = result;
-      // Show error
-      const errorMsg = result.error === "PLAYER_NOT_FOUND"
-        ? "❌ Player not found — please check your ID"
-        : result.error === "PLAYER_CHECK_UNAVAILABLE"
-        ? "⚠️ Validation service temporarily unavailable"
-        : "❌ Validation failed";
+
+      // Show appropriate error
+      let errorMsg, allowRetry;
+      switch (result.error) {
+        case "PLAYER_NOT_FOUND":
+          errorMsg = "❌ Player not found — this ID does not exist in Blood Strike";
+          allowRetry = true;
+          break;
+        case "PLAYER_CHECK_UNAVAILABLE":
+          errorMsg = "⚠️ Verification service temporarily unavailable";
+          allowRetry = true;
+          break;
+        case "PLAYER_BUSY":
+          errorMsg = "⏳ Player is busy — please try again in a moment";
+          allowRetry = true;
+          break;
+        case "RATE_LIMIT_EXCEEDED":
+          errorMsg = "🚫 Too many requests — please wait before trying again";
+          allowRetry = true;
+          break;
+        case "REGION_MISMATCH":
+          errorMsg = "🌍 Region mismatch — this product is for a different region";
+          allowRetry = false;
+          break;
+        case "INVALID_PARAMETER":
+          errorMsg = `❌ Invalid parameter: ${result.message}`;
+          allowRetry = false;
+          break;
+        default:
+          errorMsg = `❌ Validation failed: ${result.message}`;
+          allowRetry = false;
+      }
 
       await anim.revealEdit(
         ctx,
@@ -1156,60 +1242,118 @@ bot.on("text", async (ctx, next) => {
           `━━━━━━━━━━━━━━━━━━\n\n` +
           `🆔 *${game.idLabel.toUpperCase()}*\n\`${playerId}\`\n\n` +
           `💬 ${result.message}\n\n` +
-          `${result.error === "PLAYER_CHECK_UNAVAILABLE" ? "🔄 You can try again or proceed anyway" : "Please enter a valid Player ID."}`,
+          `${allowRetry ? "🔄 You can try entering your Player ID again." : "Please contact support if this persists."}`,
         { parse_mode: "Markdown" },
         { spinner: "loading", frames: 3, delay: 200 }
       );
 
-      // If player not found, let them retry
-      if (result.error === "PLAYER_NOT_FOUND") {
-        return;
+      if (allowRetry) {
+        return; // Let them enter ID again
       }
-      // If service unavailable, let them choose to proceed anyway
+      // For non-retryable errors, still let them proceed at their own risk
     }
   }
 
+  // No validation configured or non-retryable error - proceed to order confirmation
   ctx.session.playerId = playerId;
   ctx.session.playerInfo = playerInfo;
   ctx.session.waitingForPlayerId = false;
 
-  // Build order confirmation with player info if available
-  const playerInfoText = playerInfo
-    ? `\n👤 *PLAYER NAME*\n${esc(playerInfo.player_name)}\n\n🌍 *REGION*\n${playerInfo.region || "Global"}\n`
-    : "";
+  await sendOrderConfirmation(ctx, game, pkg, playerId, playerInfo, validationError);
+});
+
+/*
+|--------------------------------------------------------------------------
+| PLAYER CONFIRMATION
+|--------------------------------------------------------------------------
+| After successful player validation, user confirms or changes their ID
+*/
+bot.action("confirm_player", async (ctx) => {
+  await ctx.answerCbQuery();
+
+  const playerId = ctx.session?.playerId;
+  const playerInfo = ctx.session?.playerInfo;
+  const gameId = ctx.session?.gameId;
+  const packageId = ctx.session?.packageId;
+
+  if (!playerId || !gameId || !packageId) {
+    return ctx.reply(
+      "❌ *Session expired*\n\n" +
+        "━━━━━━━━━━━━━━━━━━\n\n" +
+        "Please start a new order.",
+      { parse_mode: "Markdown", ...homeMenu() }
+    );
+  }
+
+  const found = catalog.findPackage(gameId, packageId);
+
+  if (!found || found.game.paused || found.pkg.paused) {
+    ctx.session = {};
+
+    return ctx.reply(
+      `${UI.packagePaused}\n\n━━━━━━━━━━━━━━━━━━\n\n🕹️ Choose another game:`,
+      {
+        parse_mode: "Markdown",
+        ...gamesMenu(),
+      }
+    );
+  }
+
+  const { game, pkg } = found;
+
+  ctx.session.waitingForPlayerId = false;
+
+  await sendOrderConfirmation(ctx, game, pkg, playerId, playerInfo, null);
+});
+
+bot.action("change_player_id", async (ctx) => {
+  await ctx.answerCbQuery();
+
+  const gameId = ctx.session?.gameId;
+  const packageId = ctx.session?.packageId;
+
+  if (!gameId || !packageId) {
+    return ctx.reply(
+      "❌ *Session expired*\n\n" +
+        "━━━━━━━━━━━━━━━━━━\n\n" +
+        "Please start a new order.",
+      { parse_mode: "Markdown", ...homeMenu() }
+    );
+  }
+
+  const found = catalog.findPackage(gameId, packageId);
+
+  if (!found || found.game.paused || found.pkg.paused) {
+    ctx.session = {};
+
+    return ctx.reply(
+      `${UI.packagePaused}\n\n━━━━━━━━━━━━━━━━━━\n\n🕹️ Choose another game:`,
+      {
+        parse_mode: "Markdown",
+        ...gamesMenu(),
+      }
+    );
+  }
+
+  const { game, pkg } = found;
+
+  // Reset player ID and validation info, keep game/package
+  ctx.session.playerId = null;
+  ctx.session.playerInfo = null;
+  ctx.session.waitingForPlayerId = true;
 
   await ctx.reply(
-    `🧾 *ORDER CONFIRMATION*\n\n` +
+    `✏️ *CHANGE PLAYER ID*\n\n` +
       `━━━━━━━━━━━━━━━━━━\n\n` +
       `🎮 *GAME*\n${game.name}\n\n` +
       `📦 *PACKAGE*\n${pkg.name}\n\n` +
-      `🆔 *${game.idLabel.toUpperCase()}*\n\`${playerId}\`` +
-      `${playerInfoText}` +
       `━━━━━━━━━━━━━━━━━━\n\n` +
-      `💰 *TOTAL*\nLKR ${catalog.formatPrice(pkg.price)}\n\n` +
-      `━━━━━━━━━━━━━━━━━━\n\n` +
-      `${validationError && validationError.error === "PLAYER_CHECK_UNAVAILABLE"
-        ? "⚠️ *Validation skipped* — service was unavailable. Proceed at your own risk.\n\n"
-        : ""
-      }` +
-      `⚠️ Please check your ${game.idLabel}\n` +
-      `and package before confirming.\n\n` +
-      `👇 *Ready to place your order?*`,
+      `Please enter your ${game.name} ${game.idLabel} again.\n\n` +
+      `Example:\n\`${game.idExample}\``,
     {
       parse_mode: "Markdown",
       ...Markup.inlineKeyboard([
-        [
-          Markup.button.callback(
-            LABEL.confirm,
-            "confirm_order"
-          ),
-        ],
-        [
-          Markup.button.callback(
-            LABEL.cancel,
-            "cancel_order"
-          ),
-        ],
+        [Markup.button.callback(LABEL.cancel, "cancel_order")],
       ]),
     }
   );

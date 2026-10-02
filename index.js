@@ -181,7 +181,7 @@ async function notifyCustomer(order, { title, body }) {
 */
 async function sendOrderConfirmation(ctx, game, pkg, playerId, playerInfo, validationError) {
   const playerInfoText = playerInfo
-    ? `\n👤 *PLAYER NAME*\n${esc(playerInfo.player_name)}\n\n🌍 *REGION*\n${playerInfo.region || "Global"}\n`
+    ? `\n👤 PLAYER NAME\n${esc(playerInfo.player_name)}\n\n🌍 REGION\n${esc(playerInfo.region || "Global")}\n`
     : "";
 
   await ctx.reply(
@@ -195,7 +195,7 @@ async function sendOrderConfirmation(ctx, game, pkg, playerId, playerInfo, valid
       `💰 *TOTAL*\nLKR ${catalog.formatPrice(pkg.price)}\n\n` +
       `━━━━━━━━━━━━━━━━━━\n\n` +
       `${validationError && validationError.retryable
-        ? "⚠️ *Validation skipped* — service was unavailable. Proceed at your own risk.\n\n"
+        ? "⚠️ Validation skipped — service was unavailable. Proceed at your own risk.\n\n"
         : ""
       }` +
       `⚠️ Please check your ${game.idLabel}\n` +
@@ -1152,7 +1152,7 @@ bot.on("text", async (ctx, next) => {
       spinner: "search",
       barStyle: "round",
       steps: [
-        "Connecting to SHOP2TOPUP",
+        "Connecting to game servers",
         "Looking up player profile",
         "Verifying account status",
       ],
@@ -1163,11 +1163,11 @@ bot.on("text", async (ctx, next) => {
       final: (r) => {
         if (r?.success) {
           return (
-            `✅ *PLAYER VERIFIED*\n\n` +
+            `✅ PLAYER VERIFIED\n\n` +
             `━━━━━━━━━━━━━━━━━━\n\n` +
-            `🆔 *${esc(game.idLabel.toUpperCase())}*\n\`${playerId}\`\n\n` +
-            `👤 *Player Name*\n${esc(r.playerName)}\n\n` +
-            `🌍 *Region*\n${esc(r.region || "Global")}\n\n` +
+            `🆔 ${esc(game.idLabel.toUpperCase())}\n\`${playerId}\`\n\n` +
+            `👤 Player Name\n${esc(r.playerName)}\n\n` +
+            `🌍 Region\n${esc(r.region || "Global")}\n\n` +
             `━━━━━━━━━━━━━━━━━━\n\n` +
             `Please confirm this is your account.`
           );
@@ -1178,22 +1178,22 @@ bot.on("text", async (ctx, next) => {
 
         const heading =
           e.error === "PLAYER_NOT_FOUND"
-            ? "❌ *PLAYER NOT FOUND*"
+            ? "❌ PLAYER NOT FOUND"
             : e.error === "PLAYER_CHECK_UNAVAILABLE" ||
                 e.error === "NETWORK_ERROR"
-              ? "⚠️ *VERIFICATION UNAVAILABLE*"
+              ? "⚠️ VERIFICATION UNAVAILABLE"
               : e.error === "PLAYER_BUSY"
-                ? "⏳ *PLAYER BUSY*"
+                ? "⏳ PLAYER BUSY"
                 : e.error === "RATE_LIMIT_EXCEEDED"
-                  ? "🚫 *TOO MANY REQUESTS*"
-                  : `❌ *${esc(String(e.error || "ERROR").replace(/_/g, " "))}*`;
+                  ? "🚫 TOO MANY REQUESTS"
+                  : `❌ ${esc(String(e.error || "ERROR").replace(/_/g, " "))}`;
 
         const advice =
           e.error === "PLAYER_NOT_FOUND"
             ? "This ID does not exist in the game. Please check it and try again."
             : e.error === "PLAYER_CHECK_UNAVAILABLE" ||
                 e.error === "NETWORK_ERROR"
-              ? "We could not reach the game right now. Your ID has **not** been rejected — please try again in a moment."
+              ? "We could not reach the game right now. Your ID has not been rejected — please try again in a moment."
               : e.error === "PLAYER_BUSY"
                 ? "The game is busy for this player. Please try again shortly."
                 : e.error === "RATE_LIMIT_EXCEEDED"
@@ -1203,7 +1203,7 @@ bot.on("text", async (ctx, next) => {
         return (
           `${heading}\n\n` +
           `━━━━━━━━━━━━━━━━━━\n\n` +
-          `🆔 *${esc(game.idLabel.toUpperCase())}*\n\`${playerId}\`\n\n` +
+          `🆔 ${esc(game.idLabel.toUpperCase())}\n\`${playerId}\`\n\n` +
           `💬 ${advice}\n\n` +
           (retryable
             ? `🔄 Send your ${game.idLabel} again to retry.`
@@ -1225,8 +1225,8 @@ bot.on("text", async (ctx, next) => {
 
       await anim.successBeat(ctx, {
         text:
-          `👆 Tap *Confirm* to continue with this account,` +
-          ` or *Change ID* to enter a different one.`,
+          `👆 Tap Confirm below to continue with this account,` +
+          ` or Change ID to enter a different one.`,
         extra: {
           parse_mode: "Markdown",
           ...Markup.inlineKeyboard([

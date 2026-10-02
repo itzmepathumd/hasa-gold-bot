@@ -47,7 +47,7 @@ check(
 );
 check(
   "paused game drops out of activeGames",
-  catalog.activeGames().length === 0
+  catalog.activeGames().every((g) => g.id !== "blood_strike")
 );
 catalog.toggleGame("blood_strike");
 
@@ -117,7 +117,7 @@ check(
 
 catalog.deleteGame(newGame.id);
 catalog.deleteGame(dupGame.id);
-check("games back to 1", catalog.getGames().length === 1);
+check("games back to 2", catalog.getGames().length === 2);
 
 console.log("\n== payment methods ==");
 

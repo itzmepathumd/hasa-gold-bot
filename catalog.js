@@ -95,6 +95,25 @@ const DEFAULT_CATALOG = {
         },
       ],
     },
+    {
+      id: "free_fire",
+      name: "Free Fire",
+      emoji: "🔥",
+      paused: false,
+      idLabel: "Player ID",
+      idExample: "123456789",
+      packages: [
+        {
+          id: "weekly",
+          name: "📅 Weekly",
+          price: 590,
+          paused: false,
+          note: "",
+          sub_category_id: 110,
+          requirements: [],
+        },
+      ],
+    },
   ],
 
   payments: [

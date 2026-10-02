@@ -366,7 +366,7 @@ console.log("\n== add game flow ==");
   console.log("\n== cleanup ==");
   catalog.deleteGame(created.id);
   if (pay) catalog.deletePayment(pay.id);
-  check("catalog restored to 1 game", catalog.getGames().length === 1);
+  check("catalog restored to 2 games", catalog.getGames().length === 2);
   check("catalog restored to 2 payments", catalog.getPayments().length === 2);
 
   console.log(

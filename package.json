@@ -14,6 +14,7 @@
     "dotenv": "^18.0.4",
     "firebase-admin": "^14.5.0",
     "telegraf": "^4.16.3",
+    "telegram": "^2.26.22",
     "uuid": "^14.0.2"
   }
 }

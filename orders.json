@@ -126,5 +126,26 @@
     "paymentSubmittedAt": "2026-10-01T16:33:24.554Z",
     "approvedAt": "2026-10-01T16:35:20.009Z",
     "rejectedAt": null
+  },
+  {
+    "id": "HG-086455-9E8968",
+    "userId": 8278530664,
+    "username": "methsarp",
+    "firstName": "Methsara",
+    "playerId": "11927288867",
+    "playerName": "Black\"\",ZORO",
+    "playerRegion": "SG",
+    "gameId": "free_fire",
+    "gameName": "Free Fire",
+    "idLabel": "Player ID",
+    "productKey": "weekly",
+    "productName": "📅 Weekly",
+    "price": 590,
+    "status": "approved",
+    "paymentProof": "AgACAgUAAxkBAAIDW2q_2haFGm0l8YdYQL5-qflhxjj9AALmF2sbnqgBVt53PZ7-8Er-AQADAgADdwADPQQ",
+    "createdAt": "2026-10-02T16:21:26.455Z",
+    "paymentSubmittedAt": "2026-10-02T16:21:42.594Z",
+    "approvedAt": "2026-10-02T16:21:52.820Z",
+    "rejectedAt": null
   }
 ]

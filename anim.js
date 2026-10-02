@@ -141,7 +141,7 @@ async function stages(ctx, {
   title,
   steps = [],
   work,                 // optional async work run while the bar animates
-  final,                // string, or (workResult) => string
+  final,                // string, {text, extra, parse_mode}, or (workResult) => either
   extra,
   frame = 900,
   spinner = "braille",
@@ -172,13 +172,14 @@ async function stages(ctx, {
     messageId = sent.message_id;
   } catch { /* reveal will fall back to a fresh send */ }
 
-  const editById = async (text) => {
+  const editById = async (text, editExtra) => {
     const chatId = ctx.chat?.id ?? ctx.chatId;
     if (messageId == null || chatId == null) return false;
     try {
       // editMessageText(chatId, messageId, inlineMessageId, text, extra)
       await ctx.telegram.editMessageText(chatId, messageId, undefined, text, {
         parse_mode: "HTML",
+        ...(editExtra || {}),
       });
       return true;
     } catch {
@@ -215,15 +216,36 @@ async function stages(ctx, {
     workResult = { __error: err };
   }
 
-  const finalText = typeof final === "function" ? final(workResult) : final;
+  const revealed = typeof final === "function" ? final(workResult) : final;
+
+  // A reveal may carry its own keyboard and parse mode so the buttons
+  // arrive with the content instead of in a follow-up message.
+  const finalText =
+    revealed && typeof revealed === "object" ? revealed.text : revealed;
+
+  const finalExtra =
+    revealed && typeof revealed === "object" ? revealed.extra : undefined;
+
+  const finalParseMode =
+    revealed && typeof revealed === "object"
+      ? revealed.parse_mode || parseMode
+      : parseMode;
 
   // Reveal into the same message so no orphan loader is left behind.
+  const revealExtra = {
+    parse_mode: finalParseMode,
+    ...(extra || {}),
+    ...(finalExtra || {}),
+  };
+
   if (messageId != null && finalText) {
-    if (await editById(finalText)) return { animated: true, messageId, result: workResult };
+    if (await editById(finalText, revealExtra)) {
+      return { animated: true, messageId, result: workResult };
+    }
   }
 
   try {
-    await ctx.reply(finalText, { parse_mode: parseMode, ...extra });
+    await ctx.reply(finalText, revealExtra);
   } catch { /* nothing more we can do */ }
 
   return { animated: false, messageId, result: workResult };

@@ -337,7 +337,7 @@ function replyMenu() {
   return Markup.keyboard([
     ["🕹️  Games"],
     ["📦  My Orders", "💬  Support"],
-    ["🏠  Home"],
+    ["ℹ️  About", "🏠  Home"],
   ])
     .resize()
     .persistent();
@@ -359,6 +359,7 @@ const LABEL = {
   confirm: "✅  CONFIRM ORDER",
   cancel: "❌  CANCEL",
   products: "🛍  PACKAGES",
+  about: "ℹ️  ABOUT",
 };
 
 function homeMenu() {
@@ -368,7 +369,10 @@ function homeMenu() {
       Markup.button.callback(LABEL.myOrders, "my_orders"),
       Markup.button.callback(LABEL.support, "support"),
     ],
-    [Markup.button.callback(LABEL.home, "home")],
+    [
+      Markup.button.callback(LABEL.about, "about"),
+      Markup.button.callback(LABEL.home, "home"),
+    ],
   ]);
 }
 
@@ -476,7 +480,92 @@ function supportMenu() {
       Markup.button.callback(LABEL.games, "games"),
       Markup.button.callback(LABEL.home, "home"),
     ],
+    [Markup.button.callback(LABEL.about, "about")],
   ]);
+}
+
+/*
+|--------------------------------------------------------------------------
+| ABOUT / DEVELOPER
+|--------------------------------------------------------------------------
+*/
+const DEVELOPER = {
+  company: "Vynloq Software Solutions",
+  telegram: "methsarap",
+  whatsapp: "+94753492120",
+  website: "https://www.vynloq.web.app",
+};
+
+function aboutMenu() {
+  return Markup.inlineKeyboard([
+    [
+      Markup.button.url(
+        "💬  TELEGRAM",
+        `https://t.me/${DEVELOPER.telegram}`
+      ),
+      Markup.button.url(
+        "📞  WHATSAPP",
+        `https://wa.me/${DEVELOPER.whatsapp.replace(/\D/g, "")}`
+      ),
+    ],
+    [
+      Markup.button.url(
+        "🌐  WEBSITE",
+        DEVELOPER.website
+      ),
+    ],
+    [
+      Markup.button.callback(LABEL.games, "games"),
+      Markup.button.callback(LABEL.support, "support"),
+      Markup.button.callback(LABEL.home, "home"),
+    ],
+  ]);
+}
+
+function aboutText() {
+  return (
+    `<b>✨ HASA GOLD STORE ✨</b>\n` +
+    `<i>Premium gaming top-ups, delivered fast</i>\n\n` +
+    `━━━━━━━━━━━━━━━━━━\n\n` +
+    `👨‍💻 <b>DEVELOPER</b>\n\n` +
+    `🏢 <b>Company</b>\n${DEVELOPER.company}\n\n` +
+    `💬 <b>Telegram</b>\n@${DEVELOPER.telegram}\n\n` +
+    `📞 <b>WhatsApp</b>\n${DEVELOPER.whatsapp}\n\n` +
+    `🌐 <b>Website</b>\n${DEVELOPER.website}\n\n` +
+    `━━━━━━━━━━━━━━━━━━\n\n` +
+    `🎮 What we offer\n\n` +
+    `🕹️ Blood Strike — Gold &amp; passes\n` +
+    `🔥 Free Fire — Weekly passes\n` +
+    `⚡ Instant player ID verification\n` +
+    `🔒 Secure manual payment review\n\n` +
+    `━━━━━━━━━━━━━━━━━━\n\n` +
+    `💜 Built with care by\n` +
+    `<b>${DEVELOPER.company}</b>\n\n` +
+    `Thank you for shopping with us! 🎉`
+  );
+}
+
+async function showAbout(ctx) {
+  await anim.stages(ctx, {
+    title: "Loading developer info",
+    emoji: "✨",
+    spinner: "search",
+    barStyle: "round",
+    steps: [
+      "Gathering store details",
+      "Loading developer profile",
+      "Preparing contact links",
+    ],
+    frame: 700,
+    minDuration: 2600,
+    // The reveal carries its own keyboard and parse mode, so the buttons
+    // land on the same message as the page.
+    final: () => ({
+      text: aboutText(),
+      parse_mode: "HTML",
+      extra: aboutMenu(),
+    }),
+  });
 }
 
 function ordersMenu(hasOrders) {
@@ -510,6 +599,10 @@ bot.command("orders", async (ctx) => {
 
 bot.command("games", async (ctx) => {
   await showGames(ctx, false);
+});
+
+bot.command("about", async (ctx) => {
+  await showAbout(ctx);
 });
 
 /*
@@ -667,6 +760,14 @@ bot.action("support", async (ctx) => {
     parse_mode: "Markdown",
     ...supportMenu(),
   });
+});
+
+bot.action("about", async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+
+  // The page is long, so it is sent as a new message rather than edited
+  // into the button that was tapped.
+  await showAbout(ctx);
 });
 /*
 |--------------------------------------------------------------------------
@@ -1177,6 +1278,10 @@ bot.hears("🏠  Home", async (ctx) => {
     parse_mode: "Markdown",
     ...homeMenu(),
   });
+});
+
+bot.hears("ℹ️  About", async (ctx) => {
+  await showAbout(ctx);
 });
 
 /*
@@ -3759,6 +3864,10 @@ bot.telegram.setMyCommands([
   {
     command: "orders",
     description: "📦 View my orders",
+  },
+  {
+    command: "about",
+    description: "ℹ️ Developer & contact",
   },
   {
     command: "admin",

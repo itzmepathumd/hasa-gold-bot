@@ -67,7 +67,8 @@ function typing(ctx, { action = "typing", duration = 2000 } = {}) {
 
 /* ── Progress bar builders ── */
 function progressBar(done, total, width = 12, style = "default") {
-  const filled = Math.max(0, Math.min(width, Math.round((done / total) * width)));
+  const ratio = total > 0 ? done / total : 0;
+  const filled = Math.max(0, Math.min(width, Math.round(ratio * width)));
   const empty = width - filled;
 
   switch (style) {
@@ -85,7 +86,24 @@ function progressBar(done, total, width = 12, style = "default") {
 }
 
 function progressPercent(done, total) {
-  return Math.round((done / total) * 100);
+  if (!Number.isFinite(done) || !Number.isFinite(total) || total <= 0) return 0;
+  return Math.max(0, Math.min(100, Math.round((done / total) * 100)));
+}
+
+/* Resolve a spinner name to its frame list. */
+function pickFrames(spinner) {
+  switch (spinner) {
+    case "dots": return SPINNER_DOTS;
+    case "gear": return SPINNER_GEAR;
+    case "rocket": return SPINNER_ROCKET;
+    case "sparkle": return SPINNER_SPARKLE;
+    case "loading": return SPINNER_LOADING;
+    case "search": return SPINNER_SEARCH;
+    case "package": return SPINNER_PACKAGE;
+    case "money": return SPINNER_MONEY;
+    case "check": return SPINNER_CHECK;
+    default: return SPINNER_BRAILLE;
+  }
 }
 
 /* ── Safe edit with chatId resolution ── */
@@ -115,103 +133,105 @@ function emojiLabel(emoji, text) {
 /* ── STAGED PROGRESS — 5-7s total ──
    Steps render as: spinner + bar + ✅ completed steps
    Final replaces the whole message. */
+/* ── STAGED PROGRESS — runs `work`, then reveals into the SAME message ──
+   The animation message is created with ctx.reply, so it has no callback
+   query to edit. stages() therefore edits it by id through ctx.telegram,
+   and owns the whole sequence: animate -> work() -> reveal.            */
 async function stages(ctx, {
   title,
   steps = [],
-  final,
+  work,                 // optional async work run while the bar animates
+  final,                // string, or (workResult) => string
   extra,
-  frame = 900,       // ms per step (3 steps × 900 = 2.7s + pauses = ~4-5s)
+  frame = 900,
   spinner = "braille",
   barStyle = "default",
   showPercent = true,
   emoji = "⚡",
+  parseMode = "HTML",
+  minDuration = 3200,   // keep the loader visible even on a fast reply
 } = {}) {
-  const list = Array.isArray(steps) ? steps : [];
-  const total = Math.max(list.length, 1);
+  const list = Array.isArray(steps) && steps.length ? steps : ["Working"];
+  const total = list.length;
 
-  const spinnerFrames =
-    spinner === "dots" ? SPINNER_DOTS :
-    spinner === "gear" ? SPINNER_GEAR :
-    spinner === "rocket" ? SPINNER_ROCKET :
-    spinner === "sparkle" ? SPINNER_SPARKLE :
-    spinner === "loading" ? SPINNER_LOADING :
-    spinner === "search" ? SPINNER_SEARCH :
-    spinner === "package" ? SPINNER_PACKAGE :
-    spinner === "money" ? SPINNER_MONEY :
-    spinner === "check" ? SPINNER_CHECK :
-    SPINNER_BRAILLE;
+  const spinnerFrames = pickFrames(spinner);
 
   let messageId = null;
-  let lastText = "";
 
-  // Initial frame
-  try {
-    const initialText = buildFrame(0, 0, "");
-    const sent = await ctx.reply(initialText, { parse_mode: "HTML" });
-    messageId = sent.message_id;
-  } catch { /* final will still send */ }
-
-  // Animate each step
-  for (let i = 0; i < list.length; i++) {
-    await sleep(frame);
-
-    const done = i + 1;
-    const stepText = list.slice(0, done).map((s, idx) => `  ✅ ${s}`).join("\n");
-    const text = buildFrame(done, total, stepText);
-
-    if (text === lastText) continue;
-    lastText = text;
-
-    if (messageId === null) {
-      try {
-        const sent = await ctx.reply(text, { parse_mode: "HTML" });
-        messageId = sent.message_id;
-      } catch { /* keep trying final */ }
-      continue;
-    }
-
-    await safeEdit(ctx, messageId, text, { parse_mode: "HTML" });
-  }
-
-  // Completion pause
-  await sleep(700);
-
-  // Final reveal
-  if (messageId !== null) {
-    const ok = await safeEdit(ctx, messageId, final, { parse_mode: "HTML", ...extra });
-    if (ok) return { animated: true, messageId };
-  }
-
-  // Fallback
-  try {
-    await ctx.reply(final, { parse_mode: "HTML", ...extra });
-  } catch { /* nothing more */ }
-
-  return { animated: false, messageId };
-
-  function buildFrame(done, total, completedSteps) {
+  const render = (done, completedSteps) => {
     const spin = spinnerFrames[done % spinnerFrames.length];
     const bar = progressBar(done, total, 12, barStyle);
     const pct = showPercent ? ` ${progressPercent(done, total)}%` : "";
-    const header = `${spin}  <b>${emoji} ${title}</b>${pct}\n\n`;
-    const barLine = `<code>${bar}</code>\n`;
-    return `${header}${barLine}${completedSteps}`;
+    const head = `${spin}  <b>${emoji} ${title}</b>${pct}\n\n<code>${bar}</code>\n`;
+    return completedSteps ? `${head}${completedSteps}` : head.trimEnd();
+  };
+
+  // Seed the animation message.
+  try {
+    const sent = await ctx.reply(render(0, ""), { parse_mode: "HTML" });
+    messageId = sent.message_id;
+  } catch { /* reveal will fall back to a fresh send */ }
+
+  const editById = async (text) => {
+    const chatId = ctx.chat?.id ?? ctx.chatId;
+    if (messageId == null || chatId == null) return false;
+    try {
+      // editMessageText(chatId, messageId, inlineMessageId, text, extra)
+      await ctx.telegram.editMessageText(chatId, messageId, undefined, text, {
+        parse_mode: "HTML",
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  // Start the real work immediately so it overlaps the animation.
+  const started = Date.now();
+  const workPromise = typeof work === "function" ? work() : Promise.resolve(undefined);
+  let settled = false;
+  workPromise.then(() => { settled = true; }, () => { settled = true; });
+
+  for (let i = 0; i < total; i++) {
+    await sleep(frame);
+
+    const done = i + 1;
+    const doneSteps = list.slice(0, done).map((s) => `  ✅ ${s}`).join("\n");
+
+    await editById(render(done, doneSteps));
   }
+
+  // If the API answered early, hold the completed bar so the loader reads
+  // as deliberate rather than a flash.
+  const elapsed = Date.now() - started;
+  if (!settled || elapsed < minDuration) {
+    await sleep(Math.max(0, minDuration - elapsed));
+  }
+
+  let workResult;
+  try {
+    workResult = await workPromise;
+  } catch (err) {
+    workResult = { __error: err };
+  }
+
+  const finalText = typeof final === "function" ? final(workResult) : final;
+
+  // Reveal into the same message so no orphan loader is left behind.
+  if (messageId != null && finalText) {
+    if (await editById(finalText)) return { animated: true, messageId, result: workResult };
+  }
+
+  try {
+    await ctx.reply(finalText, { parse_mode: parseMode, ...extra });
+  } catch { /* nothing more we can do */ }
+
+  return { animated: false, messageId, result: workResult };
 }
 
 /* ── INLINE BUTTON SPINNER — for callback queries ── */
 async function withSpinner(ctx, { label, work, result, extra, spinner = "braille" } = {}) {
-  const frames =
-    spinner === "dots" ? SPINNER_DOTS :
-    spinner === "gear" ? SPINNER_GEAR :
-    spinner === "rocket" ? SPINNER_ROCKET :
-    spinner === "sparkle" ? SPINNER_SPARKLE :
-    spinner === "loading" ? SPINNER_LOADING :
-    spinner === "search" ? SPINNER_SEARCH :
-    spinner === "package" ? SPINNER_PACKAGE :
-    spinner === "money" ? SPINNER_MONEY :
-    spinner === "check" ? SPINNER_CHECK :
-    SPINNER_BRAILLE;
+  const frames = pickFrames(spinner);
 
   let spun = false;
   try {
@@ -237,19 +257,10 @@ async function withSpinner(ctx, { label, work, result, extra, spinner = "braille
   }
 }
 
-/* ── QUICK REVEAL for button taps (spinner → content) ── */
+/* ── QUICK REVEAL for button taps (spinner → content) ──
+   Only valid for callback-query contexts: it edits the tapped message. */
 async function revealEdit(ctx, label, text, extra, { spinner = "braille", frames = 3, delay = 250 } = {}) {
-  const spinFrames =
-    spinner === "dots" ? SPINNER_DOTS :
-    spinner === "gear" ? SPINNER_GEAR :
-    spinner === "rocket" ? SPINNER_ROCKET :
-    spinner === "sparkle" ? SPINNER_SPARKLE :
-    spinner === "loading" ? SPINNER_LOADING :
-    spinner === "search" ? SPINNER_SEARCH :
-    spinner === "package" ? SPINNER_PACKAGE :
-    spinner === "money" ? SPINNER_MONEY :
-    spinner === "check" ? SPINNER_CHECK :
-    SPINNER_BRAILLE;
+  const spinFrames = pickFrames(spinner);
 
   for (let i = 0; i < frames; i++) {
     try {

@@ -1138,120 +1138,118 @@ bot.on("text", async (ctx, next) => {
     );
   }
 
-  // Validate player with SHOP2TOPUP if sub_category_id is configured
+  // Validate player with SHOP2TOPUP if sub_category_id is configured.
+  // stages() owns one message end to end: animate -> API call -> reveal,
+  // so the loader never survives as an orphan line above the result.
   const subCategoryId = pkg.sub_category_id;
   let playerInfo = null;
   let validationError = null;
 
   if (subCategoryId) {
-    // Show validation animation
-    const validationResult = await anim.stages(ctx, {
+    const { result } = await anim.stages(ctx, {
       title: "Checking Player ID",
+      emoji: "🔍",
+      spinner: "search",
+      barStyle: "round",
       steps: [
         "Connecting to SHOP2TOPUP",
         "Looking up player profile",
         "Verifying account status",
       ],
-      final: "",
-      extra: { parse_mode: "Markdown" },
       frame: 800,
-      spinner: "search",
-      barStyle: "round",
-      emoji: "🔍",
-      showPercent: true,
+      parseMode: "Markdown",
+      work: () => playerValidate.validateShop2TopupPlayer(playerId, pkg),
+
+      final: (r) => {
+        if (r?.success) {
+          return (
+            `✅ *PLAYER VERIFIED*\n\n` +
+            `━━━━━━━━━━━━━━━━━━\n\n` +
+            `🆔 *${esc(game.idLabel.toUpperCase())}*\n\`${playerId}\`\n\n` +
+            `👤 *Player Name*\n${esc(r.playerName)}\n\n` +
+            `🌍 *Region*\n${esc(r.region || "Global")}\n\n` +
+            `━━━━━━━━━━━━━━━━━━\n\n` +
+            `Please confirm this is your account.`
+          );
+        }
+
+        const e = r || {};
+        const retryable = Boolean(e.retryable);
+
+        const heading =
+          e.error === "PLAYER_NOT_FOUND"
+            ? "❌ *PLAYER NOT FOUND*"
+            : e.error === "PLAYER_CHECK_UNAVAILABLE" ||
+                e.error === "NETWORK_ERROR"
+              ? "⚠️ *VERIFICATION UNAVAILABLE*"
+              : e.error === "PLAYER_BUSY"
+                ? "⏳ *PLAYER BUSY*"
+                : e.error === "RATE_LIMIT_EXCEEDED"
+                  ? "🚫 *TOO MANY REQUESTS*"
+                  : `❌ *${esc(String(e.error || "ERROR").replace(/_/g, " "))}*`;
+
+        const advice =
+          e.error === "PLAYER_NOT_FOUND"
+            ? "This ID does not exist in the game. Please check it and try again."
+            : e.error === "PLAYER_CHECK_UNAVAILABLE" ||
+                e.error === "NETWORK_ERROR"
+              ? "We could not reach the game right now. Your ID has **not** been rejected — please try again in a moment."
+              : e.error === "PLAYER_BUSY"
+                ? "The game is busy for this player. Please try again shortly."
+                : e.error === "RATE_LIMIT_EXCEEDED"
+                  ? "Too many checks right now. Please wait a minute and retry."
+                  : esc(e.message || "Something went wrong. Please try again.");
+
+        return (
+          `${heading}\n\n` +
+          `━━━━━━━━━━━━━━━━━━\n\n` +
+          `🆔 *${esc(game.idLabel.toUpperCase())}*\n\`${playerId}\`\n\n` +
+          `💬 ${advice}\n\n` +
+          (retryable
+            ? `🔄 Send your ${game.idLabel} again to retry.`
+            : `💬 Contact support if this keeps happening.`)
+        );
+      },
     });
 
-    // Call the validation API
-    const result = await playerValidate.validateShop2TopupPlayer(playerId, pkg);
-
-    if (result.success) {
-      playerInfo = {
+    if (result?.success) {
+      // Hold the verified player in session; the order is only placed
+      // after the customer taps Confirm.
+      ctx.session.pendingPlayerId = playerId;
+      ctx.session.pendingPlayerInfo = {
         player_id: result.playerId,
         player_name: result.playerName,
         region: result.region,
       };
+      ctx.session.waitingForPlayerId = false;
 
-      // Show success with Confirm/Change ID buttons
-      await anim.revealEdit(
-        ctx,
-        "Validation successful",
-        `✅ *PLAYER VERIFIED*\n\n` +
-          `━━━━━━━━━━━━━━━━━━\n\n` +
-          `🆔 *Player ID:* \`${playerId}\`\n` +
-          `👤 *Player Name:* ${esc(result.playerName)}\n` +
-          `🌍 *Region:* ${result.region || "Global"}\n\n` +
-          `━━━━━━━━━━━━━━━━━━\n\n` +
-          `Please confirm this is your account.`,
-        { parse_mode: "Markdown" },
-        { spinner: "check", frames: 3, delay: 200 }
-      );
-
-      // Send confirmation buttons as a separate message
-      await ctx.reply(
-        `Ready to proceed?`,
-        {
+      await anim.successBeat(ctx, {
+        text:
+          `👆 Tap *Confirm* to continue with this account,` +
+          ` or *Change ID* to enter a different one.`,
+        extra: {
           parse_mode: "Markdown",
           ...Markup.inlineKeyboard([
             [
-              Markup.button.callback("✅ Confirm", "confirm_player"),
-              Markup.button.callback("✏️ Change ID", "change_player_id"),
+              Markup.button.callback("✅  CONFIRM", "confirm_player"),
+              Markup.button.callback("✏️  CHANGE ID", "change_player_id"),
             ],
           ]),
-        }
-      );
+        },
+      });
+
       return;
-    } else {
-      validationError = result;
-
-      // Show appropriate error
-      let errorMsg, allowRetry;
-      switch (result.error) {
-        case "PLAYER_NOT_FOUND":
-          errorMsg = "❌ Player not found — this ID does not exist in Blood Strike";
-          allowRetry = true;
-          break;
-        case "PLAYER_CHECK_UNAVAILABLE":
-          errorMsg = "⚠️ Verification service temporarily unavailable";
-          allowRetry = true;
-          break;
-        case "PLAYER_BUSY":
-          errorMsg = "⏳ Player is busy — please try again in a moment";
-          allowRetry = true;
-          break;
-        case "RATE_LIMIT_EXCEEDED":
-          errorMsg = "🚫 Too many requests — please wait before trying again";
-          allowRetry = true;
-          break;
-        case "REGION_MISMATCH":
-          errorMsg = "🌍 Region mismatch — this product is for a different region";
-          allowRetry = false;
-          break;
-        case "INVALID_PARAMETER":
-          errorMsg = `❌ Invalid parameter: ${result.message}`;
-          allowRetry = false;
-          break;
-        default:
-          errorMsg = `❌ Validation failed: ${result.message}`;
-          allowRetry = false;
-      }
-
-      await anim.revealEdit(
-        ctx,
-        "Validation failed",
-        `${errorMsg}\n\n` +
-          `━━━━━━━━━━━━━━━━━━\n\n` +
-          `🆔 *${game.idLabel.toUpperCase()}*\n\`${playerId}\`\n\n` +
-          `💬 ${result.message}\n\n` +
-          `${allowRetry ? "🔄 You can try entering your Player ID again." : "Please contact support if this persists."}`,
-        { parse_mode: "Markdown" },
-        { spinner: "loading", frames: 3, delay: 200 }
-      );
-
-      if (allowRetry) {
-        return; // Let them enter ID again
-      }
-      // For non-retryable errors, still let them proceed at their own risk
     }
+
+    validationError = result;
+
+    // Retryable problems must not look like a wrong ID.
+    const retryable = Boolean(result?.retryable);
+
+    if (retryable || result?.error === "PLAYER_NOT_FOUND") {
+      return; // Keep waitingForPlayerId set so a retry just works.
+    }
+    // Other failures are non-retryable; fall through to the order screen.
   }
 
   // No validation configured or non-retryable error - proceed to order confirmation
@@ -1271,8 +1269,8 @@ bot.on("text", async (ctx, next) => {
 bot.action("confirm_player", async (ctx) => {
   await ctx.answerCbQuery();
 
-  const playerId = ctx.session?.playerId;
-  const playerInfo = ctx.session?.playerInfo;
+  const playerId = ctx.session?.pendingPlayerId;
+  const playerInfo = ctx.session?.pendingPlayerInfo;
   const gameId = ctx.session?.gameId;
   const packageId = ctx.session?.packageId;
 
@@ -1301,7 +1299,17 @@ bot.action("confirm_player", async (ctx) => {
 
   const { game, pkg } = found;
 
+  // Promote the verified player into the live order session.
+  ctx.session.playerId = playerId;
+  ctx.session.playerInfo = playerInfo;
   ctx.session.waitingForPlayerId = false;
+
+  // Drop the verified screen so only the order summary remains.
+  try {
+    await ctx.editMessageText("✅ Confirmed. Building your order…", {
+      parse_mode: "Markdown",
+    });
+  } catch { /* already gone, or content identical */ }
 
   await sendOrderConfirmation(ctx, game, pkg, playerId, playerInfo, null);
 });
@@ -1337,10 +1345,33 @@ bot.action("change_player_id", async (ctx) => {
 
   const { game, pkg } = found;
 
-  // Reset player ID and validation info, keep game/package
+  // Discard the pending verification and ask for a fresh ID.
+  ctx.session.pendingPlayerId = null;
+  ctx.session.pendingPlayerInfo = null;
   ctx.session.playerId = null;
   ctx.session.playerInfo = null;
   ctx.session.waitingForPlayerId = true;
+
+  // Tidy the verified screen away in place of a dead prompt.
+  try {
+    await ctx.editMessageText(
+      `✏️ *CHANGE PLAYER ID*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `🎮 *GAME*\n${game.name}\n\n` +
+        `📦 *PACKAGE*\n${pkg.name}\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `Please send your ${game.name} ${game.idLabel} again.\n\n` +
+        `Example:\n\`${game.idExample}\``,
+      {
+        parse_mode: "Markdown",
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback(LABEL.cancel, "cancel_order")],
+        ]),
+      }
+    );
+
+    return;
+  } catch { /* fall through to a new message */ }
 
   await ctx.reply(
     `✏️ *CHANGE PLAYER ID*\n\n` +
@@ -1605,6 +1636,7 @@ Status: ${statusBadge(order.status)}`
     barStyle: "round",
     emoji: "📸",
     showPercent: true,
+    parseMode: "Markdown",
   });
 
   /*

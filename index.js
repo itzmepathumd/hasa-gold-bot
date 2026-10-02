@@ -4,6 +4,7 @@ const { Telegraf, Markup, session } = require("telegraf");
 const fs = require("fs");
 const crypto = require("crypto");
 const catalog = require("./catalog");
+const playerValidate = require("./playerValidate");
 const anim = require("./anim");
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
@@ -717,9 +718,99 @@ bot.on("text", async (ctx, next) => {
       );
     }
 
+    ctx.session.adminFlow = {
+      step: "package_sub_category",
+      gameId: flow.gameId,
+      packageName: flow.packageName,
+      packagePrice: price,
+    };
+
+    return ctx.reply(
+      `📦 *NEW PACKAGE*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `Name: *${esc(flow.packageName)}* ✅\n` +
+        `Price: LKR ${catalog.formatPrice(price)} ✅\n\n` +
+        `Now send the *Sub-Category ID* for player validation.\n\n` +
+        `This is a numeric ID from your validation provider.\n` +
+        `Send \`0\` or \`skip\` to disable player validation for this package.\n\n` +
+        `Example: \`999\``,
+      {
+        parse_mode: "Markdown",
+        ...cancelFlowButton(),
+      }
+    );
+  }
+
+  if (flow.step === "package_sub_category") {
+    let subCategoryId = null;
+    const cleaned = text.trim().toLowerCase();
+
+    if (cleaned !== "0" && cleaned !== "skip") {
+      const parsed = Number(text.replace(/[^0-9]/g, ""));
+      if (Number.isFinite(parsed) && parsed > 0) {
+        subCategoryId = parsed;
+      } else {
+        return ctx.reply(
+          `❌ *Invalid Sub-Category ID*\n\n` +
+            `━━━━━━━━━━━━━━━━━━\n\n` +
+            `Send a positive number, or \`0\` / \`skip\` to disable.\n\n` +
+            `Example: \`999\``,
+          { parse_mode: "Markdown" }
+        );
+      }
+    }
+
+    ctx.session.adminFlow = {
+      step: "package_requirements",
+      gameId: flow.gameId,
+      packageName: flow.packageName,
+      packagePrice: flow.packagePrice,
+      subCategoryId,
+    };
+
+    return ctx.reply(
+      `📦 *NEW PACKAGE*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `Name: *${esc(flow.packageName)}* ✅\n` +
+        `Price: LKR ${catalog.formatPrice(flow.packagePrice)} ✅\n` +
+        `Sub-Category ID: ${subCategoryId ? subCategoryId : "Disabled"} ✅\n\n` +
+        `Now send *validation requirement fields* as JSON (optional).\n\n` +
+        `These are extra fields needed by the validation API.\n` +
+        `Example: \`{"server": "Asia"}\`\n\n` +
+        `Send \`{}\` or \`skip\` for none.`,
+      {
+        parse_mode: "Markdown",
+        ...cancelFlowButton(),
+      }
+    );
+  }
+
+  if (flow.step === "package_requirements") {
+    let requirements = [];
+    const cleaned = text.trim().toLowerCase();
+
+    if (cleaned !== "{}" && cleaned !== "skip") {
+      try {
+        const parsed = JSON.parse(text);
+        if (parsed && typeof parsed === "object") {
+          requirements = Object.entries(parsed).map(([key, value]) => ({ field_name: key, value: String(value) }));
+        }
+      } catch {
+        return ctx.reply(
+          `❌ *Invalid JSON*\n\n` +
+            `━━━━━━━━━━━━━━━━━━\n\n` +
+            `Send valid JSON like \`{"server": "Asia"}\`\n` +
+            `or \`{}\` / \`skip\` for none.`,
+          { parse_mode: "Markdown" }
+        );
+      }
+    }
+
     const pkg = catalog.addPackage(flow.gameId, {
       name: flow.packageName,
-      price,
+      price: flow.packagePrice,
+      sub_category_id: flow.subCategoryId,
+      requirements,
     });
 
     const game = getGame(flow.gameId);
@@ -729,7 +820,9 @@ bot.on("text", async (ctx, next) => {
     return ctx.reply(
       `✅ *${esc(pkg.name)}* added!\n\n` +
         `━━━━━━━━━━━━━━━━━━\n\n` +
-        `💰 LKR ${catalog.formatPrice(pkg.price)}\n\n` +
+        `💰 LKR ${catalog.formatPrice(pkg.price)}\n` +
+        `🔢 Sub-Category ID: ${pkg.sub_category_id || "Disabled"}\n` +
+        `📋 Requirements: ${pkg.requirements.length > 0 ? pkg.requirements.map(r => `${r.field_name}=${r.value}`).join(", ") : "None"}\n\n` +
         `Add another package or finish.`,
       {
         parse_mode: "Markdown",
@@ -1004,18 +1097,101 @@ bot.on("text", async (ctx, next) => {
     );
   }
 
+  // Validate player with external API if sub_category_id is configured
+  const subCategoryId = pkg.sub_category_id;
+  let playerInfo = null;
+  let validationError = null;
+
+  if (subCategoryId) {
+    const validationResult = await anim.stages(ctx, {
+      title: "Validating player ID",
+      steps: [
+        "Connecting to game servers",
+        "Looking up player profile",
+        "Verifying account status",
+      ],
+      final: "", // We'll replace with actual result
+      extra: { parse_mode: "Markdown" },
+      frame: 800,
+      spinner: "search",
+      barStyle: "round",
+      emoji: "🔍",
+      showPercent: true,
+    });
+
+    // The animation sent a message; we need to send the actual result
+    // Call the validation API
+    const result = await playerValidate.validatePlayer(subCategoryId, playerId, pkg.requirements || {});
+
+    if (result.valid) {
+      playerInfo = result.player;
+      // Show success with player info
+      await anim.revealEdit(
+        ctx,
+        "Validation successful",
+        `✅ *PLAYER VALIDATED*\n\n` +
+          `━━━━━━━━━━━━━━━━━━\n\n` +
+          `🎮 *GAME*\n${game.name}\n\n` +
+          `🆔 *${game.idLabel.toUpperCase()}*\n\`${playerId}\`\n\n` +
+          `👤 *PLAYER NAME*\n${esc(playerInfo.player_name)}\n\n` +
+          `🌍 *REGION*\n${playerInfo.region || "Global"}\n\n` +
+          `━━━━━━━━━━━━━━━━━━\n\n` +
+          `✨ Player verified successfully!`,
+        { parse_mode: "Markdown" },
+        { spinner: "check", frames: 3, delay: 200 }
+      );
+    } else {
+      validationError = result;
+      // Show error
+      const errorMsg = result.error === "PLAYER_NOT_FOUND"
+        ? "❌ Player not found — please check your ID"
+        : result.error === "PLAYER_CHECK_UNAVAILABLE"
+        ? "⚠️ Validation service temporarily unavailable"
+        : "❌ Validation failed";
+
+      await anim.revealEdit(
+        ctx,
+        "Validation failed",
+        `${errorMsg}\n\n` +
+          `━━━━━━━━━━━━━━━━━━\n\n` +
+          `🆔 *${game.idLabel.toUpperCase()}*\n\`${playerId}\`\n\n` +
+          `💬 ${result.message}\n\n` +
+          `${result.error === "PLAYER_CHECK_UNAVAILABLE" ? "🔄 You can try again or proceed anyway" : "Please enter a valid Player ID."}`,
+        { parse_mode: "Markdown" },
+        { spinner: "loading", frames: 3, delay: 200 }
+      );
+
+      // If player not found, let them retry
+      if (result.error === "PLAYER_NOT_FOUND") {
+        return;
+      }
+      // If service unavailable, let them choose to proceed anyway
+    }
+  }
+
   ctx.session.playerId = playerId;
+  ctx.session.playerInfo = playerInfo;
   ctx.session.waitingForPlayerId = false;
+
+  // Build order confirmation with player info if available
+  const playerInfoText = playerInfo
+    ? `\n👤 *PLAYER NAME*\n${esc(playerInfo.player_name)}\n\n🌍 *REGION*\n${playerInfo.region || "Global"}\n`
+    : "";
 
   await ctx.reply(
     `🧾 *ORDER CONFIRMATION*\n\n` +
       `━━━━━━━━━━━━━━━━━━\n\n` +
       `🎮 *GAME*\n${game.name}\n\n` +
       `📦 *PACKAGE*\n${pkg.name}\n\n` +
-      `🆔 *${game.idLabel.toUpperCase()}*\n\`${playerId}\`\n\n` +
+      `🆔 *${game.idLabel.toUpperCase()}*\n\`${playerId}\`` +
+      `${playerInfoText}` +
       `━━━━━━━━━━━━━━━━━━\n\n` +
       `💰 *TOTAL*\nLKR ${catalog.formatPrice(pkg.price)}\n\n` +
       `━━━━━━━━━━━━━━━━━━\n\n` +
+      `${validationError && validationError.error === "PLAYER_CHECK_UNAVAILABLE"
+        ? "⚠️ *Validation skipped* — service was unavailable. Proceed at your own risk.\n\n"
+        : ""
+      }` +
       `⚠️ Please check your ${game.idLabel}\n` +
       `and package before confirming.\n\n` +
       `👇 *Ready to place your order?*`,
@@ -1077,6 +1253,8 @@ bot.action("confirm_order", async (ctx) => {
 
   const { game, pkg } = found;
 
+  const playerInfo = ctx.session?.playerInfo || null;
+
   const order = {
     id: generateOrderId(),
 
@@ -1087,6 +1265,10 @@ bot.action("confirm_order", async (ctx) => {
     firstName: ctx.from.first_name || "",
 
     playerId: playerId,
+
+    playerName: playerInfo?.player_name || null,
+
+    playerRegion: playerInfo?.region || null,
 
     gameId: game.id,
 

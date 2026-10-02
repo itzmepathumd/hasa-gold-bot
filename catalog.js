@@ -27,6 +27,8 @@ const DEFAULT_CATALOG = {
           price: 1100,
           paused: false,
           note: "",
+          sub_category_id: 999,
+          requirements: [],
         },
         {
           id: "premium",
@@ -34,6 +36,8 @@ const DEFAULT_CATALOG = {
           price: 2500,
           paused: false,
           note: "",
+          sub_category_id: 1000,
+          requirements: [],
         },
         {
           id: "levelup",
@@ -41,6 +45,8 @@ const DEFAULT_CATALOG = {
           price: 600,
           paused: false,
           note: "",
+          sub_category_id: 1001,
+          requirements: [],
         },
         {
           id: "gold100",
@@ -48,6 +54,8 @@ const DEFAULT_CATALOG = {
           price: 290,
           paused: false,
           note: "",
+          sub_category_id: 1002,
+          requirements: [],
         },
         {
           id: "gold300",
@@ -55,6 +63,8 @@ const DEFAULT_CATALOG = {
           price: 850,
           paused: false,
           note: "",
+          sub_category_id: 1003,
+          requirements: [],
         },
         {
           id: "gold500",
@@ -62,6 +72,8 @@ const DEFAULT_CATALOG = {
           price: 1350,
           paused: false,
           note: "",
+          sub_category_id: 1004,
+          requirements: [],
         },
         {
           id: "gold1000",
@@ -69,6 +81,8 @@ const DEFAULT_CATALOG = {
           price: 2700,
           paused: false,
           note: "",
+          sub_category_id: 1005,
+          requirements: [],
         },
         {
           id: "gold2000",
@@ -76,6 +90,8 @@ const DEFAULT_CATALOG = {
           price: 5300,
           paused: false,
           note: "",
+          sub_category_id: 1006,
+          requirements: [],
         },
       ],
     },
@@ -283,7 +299,7 @@ function toggleGame(gameId) {
 | PACKAGE MUTATIONS
 |--------------------------------------------------------------------------
 */
-function addPackage(gameId, { name, price, note = "" }) {
+function addPackage(gameId, { name, price, note = "", sub_category_id, requirements = [] }) {
   return update((catalog) => {
     const game = catalog.games.find((g) => g.id === gameId);
 
@@ -298,6 +314,8 @@ function addPackage(gameId, { name, price, note = "" }) {
       price: Number(price),
       paused: false,
       note: String(note || "").trim(),
+      sub_category_id: sub_category_id ? Number(sub_category_id) : null,
+      requirements: Array.isArray(requirements) ? requirements : [],
     };
 
     game.packages.push(pkg);
@@ -320,6 +338,8 @@ function updatePackage(gameId, packageId, patch) {
     if (patch.price !== undefined) pkg.price = Number(patch.price);
     if (patch.note !== undefined) pkg.note = String(patch.note).trim();
     if (patch.paused !== undefined) pkg.paused = Boolean(patch.paused);
+    if (patch.sub_category_id !== undefined) pkg.sub_category_id = patch.sub_category_id ? Number(patch.sub_category_id) : null;
+    if (patch.requirements !== undefined) pkg.requirements = Array.isArray(patch.requirements) ? patch.requirements : [];
 
     return pkg;
   });

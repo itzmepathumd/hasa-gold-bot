@@ -216,7 +216,7 @@ console.log("\n== add game flow ==");
     ctx.session.adminFlow?.step === "package_price",
     JSON.stringify(ctx.session.adminFlow));
 
-  // valid price -> package created
+  // valid price -> asks for sub_category_id
   ctx = makeCtx({ text: "1900" });
   attachSession(ctx);
   ctx.session = {
@@ -224,6 +224,37 @@ console.log("\n== add game flow ==");
       step: "package_price",
       gameId: created.id,
       packageName: "💎 600 UC",
+    },
+  };
+  await textHandler(ctx, async () => {});
+  check("asks for sub_category_id", ctx.session.adminFlow?.step === "package_sub_category",
+    JSON.stringify(ctx.session.adminFlow));
+
+  // skip sub_category_id
+  ctx = makeCtx({ text: "skip" });
+  attachSession(ctx);
+  ctx.session = {
+    adminFlow: {
+      step: "package_sub_category",
+      gameId: created.id,
+      packageName: "💎 600 UC",
+      packagePrice: 1900,
+    },
+  };
+  await textHandler(ctx, async () => {});
+  check("asks for requirements", ctx.session.adminFlow?.step === "package_requirements",
+    JSON.stringify(ctx.session.adminFlow));
+
+  // skip requirements
+  ctx = makeCtx({ text: "skip" });
+  attachSession(ctx);
+  ctx.session = {
+    adminFlow: {
+      step: "package_requirements",
+      gameId: created.id,
+      packageName: "💎 600 UC",
+      packagePrice: 1900,
+      subCategoryId: null,
     },
   };
   await textHandler(ctx, async () => {});

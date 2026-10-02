@@ -177,6 +177,35 @@ async function notifyCustomer(order, { title, body }) {
 
 /*
 |--------------------------------------------------------------------------
+| ADMIN ORDER MESSAGE EDIT
+|--------------------------------------------------------------------------
+| Order notices reach the admin either as a photo with a caption or as a
+| plain text message. Telegram refuses to edit a caption that does not
+| exist, so pick the method that matches the message being edited.
+| Failures are swallowed on purpose: the order status is already saved
+| and the customer notification must still be delivered.
+*/
+async function editOrderNotice(ctx, text) {
+  const message = ctx.callbackQuery?.message;
+
+  try {
+    // Photo notices carry a caption; plain notices carry text.
+    if (message?.photo) {
+      await ctx.editMessageCaption(text);
+    } else if (message?.text || message?.caption) {
+      await ctx.editMessageText(text);
+    } else if (typeof ctx.editMessageCaption === "function") {
+      await ctx.editMessageCaption(text);
+    } else {
+      await ctx.editMessageText(text);
+    }
+  } catch {
+    /* the notice stays as-is; status is already saved */
+  }
+}
+
+/*
+|--------------------------------------------------------------------------
 | ORDER CONFIRMATION HELPER
 |--------------------------------------------------------------------------
 */
@@ -489,7 +518,7 @@ bot.command("games", async (ctx) => {
 |--------------------------------------------------------------------------
 */
 bot.action("home", async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   ctx.session = {};
 
@@ -533,7 +562,7 @@ async function showGames(ctx, isEdit) {
 }
 
 bot.action("games", async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   await showGames(ctx, true);
 });
@@ -567,7 +596,9 @@ bot.action(/^game_(.+)$/, async (ctx) => {
     );
   }
 
-  await ctx.answerCbQuery();
+  // A stale button tap makes answerCbQuery throw; that must not stop the
+  // package list from rendering, so ack defensively.
+  await ctx.answerCbQuery().catch(() => {});
 
   await ctx.editMessageText(packageListText(game), {
     parse_mode: "Markdown",
@@ -594,7 +625,7 @@ bot.action(/^pick_(.+)~(.+)$/, async (ctx) => {
     );
   }
 
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   const { game, pkg } = found;
 
@@ -630,7 +661,7 @@ bot.action(/^pick_(.+)~(.+)$/, async (ctx) => {
 });
 
 bot.action("support", async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   await ctx.editMessageText(UI.support, {
     parse_mode: "Markdown",
@@ -1092,7 +1123,7 @@ bot.on("text", async (ctx, next) => {
 });
 
 bot.action("flow_cancel", async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   if (ctx.from.id !== ADMIN_ID) {
     return ctx.reply("⛔ Admin access only.");
@@ -1325,7 +1356,7 @@ bot.on("text", async (ctx, next) => {
 | After successful player validation, user confirms or changes their ID
 */
 bot.action("confirm_player", async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   const playerId = ctx.session?.pendingPlayerId;
   const playerInfo = ctx.session?.pendingPlayerInfo;
@@ -1373,7 +1404,7 @@ bot.action("confirm_player", async (ctx) => {
 });
 
 bot.action("change_player_id", async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   const gameId = ctx.session?.gameId;
   const packageId = ctx.session?.packageId;
@@ -1455,7 +1486,7 @@ bot.action("change_player_id", async (ctx) => {
 */
 
 bot.action("confirm_order", async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   const gameId = ctx.session?.gameId;
   const packageId = ctx.session?.packageId;
@@ -1590,7 +1621,7 @@ bot.action("payment_done", async (ctx) => {
 */
 
 bot.action("cancel_order", async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   ctx.session = {};
 
@@ -1769,7 +1800,7 @@ PENDING APPROVAL`;
 */
 
 bot.action(/^approve_(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   if (ctx.from.id !== ADMIN_ID) {
     return ctx.reply(
@@ -1807,7 +1838,8 @@ Status: ${statusBadge(order.status)}`
   saveOrders(orders);
 
   // Edit the admin's message in place.
-  await ctx.editMessageCaption(
+  await editOrderNotice(
+    ctx,
     `✅ ORDER APPROVED
 
 🧾 Order:
@@ -1850,7 +1882,7 @@ Status:
 */
 
 bot.action(/^reject_(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   if (ctx.from.id !== ADMIN_ID) {
     return ctx.reply(
@@ -1887,7 +1919,8 @@ Status: ${statusBadge(order.status)}`
 
   saveOrders(orders);
 
-  await ctx.editMessageCaption(
+  await editOrderNotice(
+    ctx,
     `❌ ORDER REJECTED
 
 🧾 Order:
@@ -1971,7 +2004,7 @@ async function sendMyOrders(ctx, isEdit) {
 }
 
 bot.action("my_orders", async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   await sendMyOrders(ctx, true);
 });
@@ -2103,7 +2136,7 @@ function storeHomeText() {
 }
 
 bot.action("store_home", async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   if (ctx.from.id !== ADMIN_ID) {
     return ctx.reply("⛔ Admin access only.");
@@ -2172,7 +2205,7 @@ function gamesAdminMenu() {
 }
 
 bot.action("store_games", async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   if (ctx.from.id !== ADMIN_ID) {
     return ctx.reply("⛔ Admin access only.");
@@ -2286,7 +2319,7 @@ function paymentsAdminMenu() {
 }
 
 bot.action("store_payments", async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   if (ctx.from.id !== ADMIN_ID) {
     return ctx.reply("⛔ Admin access only.");
@@ -2359,7 +2392,7 @@ function paymentAdminMenu(payment) {
 }
 
 bot.action(/^sapay_(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   if (ctx.from.id !== ADMIN_ID) {
     return ctx.reply("⛔ Admin access only.");
@@ -2393,7 +2426,7 @@ bot.action(/^sapay_(.+)$/, async (ctx) => {
 });
 
 bot.action(/^sapayt_(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   if (ctx.from.id !== ADMIN_ID) {
     return ctx.reply("⛔ Admin access only.");
@@ -2412,7 +2445,7 @@ bot.action(/^sapayt_(.+)$/, async (ctx) => {
 });
 
 bot.action(/^sapayd_(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   if (ctx.from.id !== ADMIN_ID) {
     return ctx.reply("⛔ Admin access only.");
@@ -2448,7 +2481,7 @@ bot.action(/^sapayd_(.+)$/, async (ctx) => {
 });
 
 bot.action(/^sapaydc_(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   if (ctx.from.id !== ADMIN_ID) {
     return ctx.reply("⛔ Admin access only.");
@@ -2481,7 +2514,7 @@ bot.action(/^sapaydc_(.+)$/, async (ctx) => {
 });
 
 bot.action(/^sapaye_(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   if (ctx.from.id !== ADMIN_ID) {
     return ctx.reply("⛔ Admin access only.");
@@ -2516,7 +2549,7 @@ bot.action(/^sapaye_(.+)$/, async (ctx) => {
 });
 
 bot.action(/^sapayr_(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   if (ctx.from.id !== ADMIN_ID) {
     return ctx.reply("⛔ Admin access only.");
@@ -2547,7 +2580,7 @@ bot.action(/^sapayr_(.+)$/, async (ctx) => {
 
 
 bot.action(/^sagl_(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   if (ctx.from.id !== ADMIN_ID) {
     return ctx.reply("⛔ Admin access only.");
@@ -2620,7 +2653,7 @@ function packageAdminMenu(game, pkg) {
 }
 
 bot.action(/^sap_(.+)~(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   if (ctx.from.id !== ADMIN_ID) {
     return ctx.reply("⛔ Admin access only.");
@@ -2641,7 +2674,7 @@ bot.action(/^sap_(.+)~(.+)$/, async (ctx) => {
 });
 
 bot.action(/^sapt_(.+)~(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   if (ctx.from.id !== ADMIN_ID) {
     return ctx.reply("⛔ Admin access only.");
@@ -2663,7 +2696,7 @@ bot.action(/^sapt_(.+)~(.+)$/, async (ctx) => {
 });
 
 bot.action(/^sapd_(.+)~(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   if (ctx.from.id !== ADMIN_ID) {
     return ctx.reply("⛔ Admin access only.");
@@ -2702,7 +2735,7 @@ bot.action(/^sapd_(.+)~(.+)$/, async (ctx) => {
 });
 
 bot.action(/^sapdc_(.+)~(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   if (ctx.from.id !== ADMIN_ID) {
     return ctx.reply("⛔ Admin access only.");
@@ -2819,7 +2852,7 @@ function gameAdminMenu(game) {
 }
 
 bot.action("sag_new", async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   if (ctx.from.id !== ADMIN_ID) {
     return ctx.reply("⛔ Admin access only.");
@@ -2840,7 +2873,7 @@ bot.action("sag_new", async (ctx) => {
 });
 
 bot.action(/^sag_(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   if (ctx.from.id !== ADMIN_ID) {
     return ctx.reply("⛔ Admin access only.");
@@ -2873,7 +2906,7 @@ bot.action(/^sag_(.+)$/, async (ctx) => {
 |--------------------------------------------------------------------------
 */
 bot.action(/^sagt_(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   if (ctx.from.id !== ADMIN_ID) {
     return ctx.reply("⛔ Admin access only.");
@@ -2897,7 +2930,7 @@ bot.action(/^sagt_(.+)$/, async (ctx) => {
 |--------------------------------------------------------------------------
 */
 bot.action(/^sagd_(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   if (ctx.from.id !== ADMIN_ID) {
     return ctx.reply("⛔ Admin access only.");
@@ -2936,7 +2969,7 @@ bot.action(/^sagd_(.+)$/, async (ctx) => {
 });
 
 bot.action(/^sagdc_(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   if (ctx.from.id !== ADMIN_ID) {
     return ctx.reply("⛔ Admin access only.");
@@ -2978,7 +3011,7 @@ bot.action(/^sagdc_(.+)$/, async (ctx) => {
 */
 
 bot.action("admin_pending", async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   if (ctx.from.id !== ADMIN_ID) {
     return ctx.reply("⛔ Admin access only.");
@@ -3045,7 +3078,7 @@ for approval.`,
 */
 
 bot.action(/^admin_order_(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   if (ctx.from.id !== ADMIN_ID) {
     return ctx.reply("⛔ Admin access only.");
@@ -3121,7 +3154,7 @@ bot.action(/^admin_order_(.+)$/, async (ctx) => {
 */
 
 bot.action(/^admin_proof_(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   if (ctx.from.id !== ADMIN_ID) {
     return ctx.reply("⛔ Admin access only.");
@@ -3184,7 +3217,7 @@ bot.action(/^admin_proof_(.+)$/, async (ctx) => {
 */
 
 bot.action("admin_all_orders", async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   if (ctx.from.id !== ADMIN_ID) {
     return ctx.reply("⛔ Admin access only.");
@@ -3237,7 +3270,7 @@ bot.action("admin_all_orders", async (ctx) => {
 */
 
 bot.action("admin_stats", async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   if (ctx.from.id !== ADMIN_ID) {
     return ctx.reply("⛔ Admin access only.");
@@ -3450,7 +3483,7 @@ function userDetailText(user, orders) {
 |--------------------------------------------------------------------------
 */
 bot.action("admin_users", async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   if (ctx.from.id !== ADMIN_ID) {
     return ctx.reply("⛔ Admin access only.");
@@ -3467,7 +3500,7 @@ bot.action("admin_users", async (ctx) => {
 });
 
 bot.action(/^admin_users_p_(\d+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   if (ctx.from.id !== ADMIN_ID) {
     return ctx.reply("⛔ Admin access only.");
@@ -3492,7 +3525,7 @@ bot.action(/^admin_users_p_(\d+)$/, async (ctx) => {
 | search result or from an order screen.
 */
 bot.action(/^admin_user_(\d+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   if (ctx.from.id !== ADMIN_ID) {
     return ctx.reply("⛔ Admin access only.");
@@ -3505,7 +3538,7 @@ bot.action(/^admin_user_(\d+)$/, async (ctx) => {
   const user = users.find((u) => u.userId === targetId);
 
   if (!user) {
-    return ctx.answerCbQuery({ text: "Customer not found.", show_alert: true });
+    return ctx.answerCbQuery({ text: "Customer not found.", show_alert: true }).catch(() => {});
   }
 
   await ctx.editMessageText(userDetailText(user, orders), {
@@ -3530,7 +3563,7 @@ bot.action(/^admin_user_(\d+)$/, async (ctx) => {
 |--------------------------------------------------------------------------
 */
 bot.action("admin_leaderboard", async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   if (ctx.from.id !== ADMIN_ID) {
     return ctx.reply("⛔ Admin access only.");
@@ -3590,7 +3623,7 @@ bot.action("admin_leaderboard", async (ctx) => {
 });
 
 bot.action(/^admin_lb_p_(\d+)$/, async (ctx) => {
-  await ctx.answerCbQuery("");
+  await ctx.answerCbQuery().catch(() => {});
 
   if (ctx.from.id !== ADMIN_ID) {
     return ctx.reply("⛔ Admin access only.");
@@ -3641,7 +3674,7 @@ bot.action(/^admin_lb_p_(\d+)$/, async (ctx) => {
 |--------------------------------------------------------------------------
 */
 bot.action("admin_user_search", async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   if (ctx.from.id !== ADMIN_ID) {
     return ctx.reply("⛔ Admin access only.");
@@ -3670,7 +3703,7 @@ bot.action("admin_user_search", async (ctx) => {
 */
 
 bot.action("admin_home", async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   if (ctx.from.id !== ADMIN_ID) {
     return ctx.reply("⛔ Admin access only.");
@@ -3702,10 +3735,17 @@ bot.action("admin_home", async (ctx) => {
 */
 
 bot.catch((error) => {
-  console.error(
-    "❌ BOT ERROR:",
-    error
-  );
+  // Tapping a button on an old message makes answerCbQuery fail with an
+  // expired query id. That is a normal race, not a fault: log it briefly
+  // and keep serving so the rest of the bot is unaffected.
+  const message = String(error?.description || error?.message || "");
+
+  if (message.includes("query is too old") || message.includes("QUERY_ID_INVALID")) {
+    console.warn("⚠️  Stale callback query ignored:", message);
+    return;
+  }
+
+  console.error("❌ BOT ERROR:", error);
 });
 bot.telegram.setMyCommands([
   {
@@ -3760,7 +3800,7 @@ process.once(
 */
 
 bot.action(/^sage_(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   if (ctx.from.id !== ADMIN_ID) {
     return ctx.reply("⛔ Admin access only.");
@@ -3804,7 +3844,7 @@ bot.action(/^sage_(.+)$/, async (ctx) => {
 });
 
 bot.action(/^sagee_(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   if (ctx.from.id !== ADMIN_ID) {
     return ctx.reply("⛔ Admin access only.");
@@ -3831,7 +3871,7 @@ bot.action(/^sagee_(.+)$/, async (ctx) => {
 });
 
 bot.action(/^sagp_(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   if (ctx.from.id !== ADMIN_ID) {
     return ctx.reply("⛔ Admin access only.");
@@ -3862,7 +3902,7 @@ bot.action(/^sagp_(.+)$/, async (ctx) => {
 });
 
 bot.action(/^sape_price_(.+)~(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   if (ctx.from.id !== ADMIN_ID) {
     return ctx.reply("⛔ Admin access only.");
@@ -3895,7 +3935,7 @@ bot.action(/^sape_price_(.+)~(.+)$/, async (ctx) => {
 });
 
 bot.action(/^sape_name_(.+)~(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   if (ctx.from.id !== ADMIN_ID) {
     return ctx.reply("⛔ Admin access only.");

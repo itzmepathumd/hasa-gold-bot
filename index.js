@@ -5,6 +5,7 @@ const fs = require("fs");
 const crypto = require("crypto");
 const catalog = require("./catalog");
 const playerValidate = require("./playerValidate");
+const analytics = require("./analytics");
 const anim = require("./anim");
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
@@ -655,6 +656,63 @@ bot.on("text", async (ctx, next) => {
   }
 
   const text = ctx.message.text.trim();
+
+  if (flow.step === "customer_search") {
+    ctx.session.adminFlow = null;
+
+    const orders = getOrders();
+    const users = analytics.buildUsers(orders);
+    const hits = analytics.findUsers(users, text);
+
+    if (!hits.length) {
+      return ctx.reply(
+        `🔎 NO MATCHES\n\n` +
+          `━━━━━━━━━━━━━━━━━━\n\n` +
+          `Nothing found for *${esc(text)}*.\n\n` +
+          `Try a username, name, or Telegram ID.`,
+        {
+          parse_mode: "Markdown",
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback("🔎  SEARCH AGAIN", "admin_user_search")],
+            [Markup.button.callback("👥  ALL CUSTOMERS", "admin_users")],
+          ]),
+        }
+      );
+    }
+
+    if (hits.length === 1) {
+      const user = hits[0];
+
+      return ctx.reply(userDetailText(user, orders), {
+        parse_mode: "Markdown",
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback("👥  ALL CUSTOMERS", "admin_users")],
+          [Markup.button.callback("🔙  Admin Panel", "admin_home")],
+        ]),
+      });
+    }
+
+    const rows = hits.slice(0, 20).map((u) => [
+      Markup.button.callback(
+        `${u.username ? `@${u.username}` : u.firstName || u.userId}  ·  LKR ${analytics.money(u.spend)}`,
+        `admin_user_${u.userId}`
+      ),
+    ]);
+
+    return ctx.reply(
+      `🔎 ${hits.length} MATCHES for *${esc(text)}*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        resultsListText(hits),
+      {
+        parse_mode: "Markdown",
+        ...Markup.inlineKeyboard([
+          ...rows,
+          [Markup.button.callback("👥  ALL CUSTOMERS", "admin_users")],
+          [Markup.button.callback("🔙  Admin Panel", "admin_home")],
+        ]),
+      }
+    );
+  }
 
   if (flow.step === "game_name") {
     ctx.session.adminFlow = { step: "game_emoji", gameName: text };
@@ -1955,6 +2013,12 @@ function adminMenu() {
     ],
     [
       Markup.button.callback(
+        "👥  CUSTOMERS",
+        "admin_users"
+      ),
+    ],
+    [
+      Markup.button.callback(
         "📦  ALL ORDERS",
         "admin_all_orders"
       ),
@@ -3181,59 +3245,420 @@ bot.action("admin_stats", async (ctx) => {
 
   const orders = getOrders();
 
-  const approved = orders.filter(
-    (o) => o.status === "approved"
+  await ctx.editMessageText(statsText(orders), {
+    parse_mode: "Markdown",
+    ...statsMenu(),
+  });
+});
+
+/*
+|--------------------------------------------------------------------------
+| ANALYTICS VIEWS
+|--------------------------------------------------------------------------
+| Pure formatting, kept beside the handlers so the screens stay readable.
+*/
+function statsText(orders) {
+  const s = analytics.summarise(orders);
+  const daily = analytics.dailyRevenue(orders, 7);
+  const games = analytics.byGame(orders).slice(0, 5);
+  const products = analytics.byProduct(orders, 5);
+
+  const peak = daily.reduce((m, d) => Math.max(m, d.revenue), 0);
+
+  const spark = daily
+    .map((d) => {
+      if (!d.revenue) return "▱";
+      const ratio = peak ? d.revenue / peak : 0;
+      return ratio > 0.75 ? "▰" : ratio > 0.4 ? "▰" : ratio > 0 ? "▱" : "▱";
+    })
+    .join("");
+
+  return (
+    `📊 SALES DASHBOARD\n\n` +
+    `━━━━━━━━━━━━━━━━━━\n\n` +
+    `💰 Revenue (approved)\n` +
+    `LKR ${analytics.money(s.revenue)}\n\n` +
+    `⏳ In flight (unapproved)\n` +
+    `LKR ${analytics.money(s.inFlightValue)}\n\n` +
+    `━━━━━━━━━━━━━━━━━━\n\n` +
+    `🧾 Total orders: ${s.totalOrders}\n` +
+    `✅ Approved: ${s.approved}\n` +
+    `🔍 Pending: ${s.inFlight}\n` +
+    `❌ Rejected: ${s.rejected}\n` +
+    `👥 Customers: ${s.uniqueUsers}\n` +
+    `📈 Approval rate: ${s.approvalRate.toFixed(0)}%\n` +
+    `🧮 Avg order: LKR ${analytics.money(Math.round(s.avgOrder))}\n\n` +
+    `━━━━━━━━━━━━━━━━━━\n\n` +
+    `📅 LAST 7 DAYS\n` +
+    `\`${spark}\`\n\n` +
+    `━━━━━━━━━━━━━━━━━━\n\n` +
+    `🎮 TOP GAMES\n` +
+    (games.length
+      ? games
+          .map(
+            (g, i) =>
+              `${i + 1}. ${esc(g.name)} — ${g.orders} · LKR ${analytics.money(g.revenue)}`
+          )
+          .join("\n")
+      : "_No approved orders yet_") +
+    `\n\n━━━━━━━━━━━━━━━━━━\n\n` +
+    `📦 TOP PRODUCTS\n` +
+    (products.length
+      ? products
+          .map(
+            (p, i) =>
+              `${i + 1}. ${esc(p.name)} — ${p.orders} · LKR ${analytics.money(p.revenue)}`
+          )
+          .join("\n")
+      : "_No approved orders yet_")
   );
+}
 
-  const pending = orders.filter(
-    (o) => o.status === "pending_approval"
+function statsMenu() {
+  return Markup.inlineKeyboard([
+    [
+      Markup.button.callback("👥  CUSTOMERS", "admin_users"),
+      Markup.button.callback("🏆  LEADERBOARD", "admin_leaderboard"),
+    ],
+    [
+      Markup.button.callback("🔎  SEARCH USER", "admin_user_search"),
+    ],
+    [
+      Markup.button.callback("🔙  Admin Panel", "admin_home"),
+    ],
+  ]);
+}
+
+function userRow(u, rank) {
+  const medal = rank === 0 ? "🥇" : rank === 1 ? "🥈" : rank === 2 ? "🥉" : `${rank + 1}.`;
+  const who = u.username ? `@${esc(u.username)}` : esc(u.firstName || "No username");
+
+  return (
+    `${medal} ${who}\n` +
+    `    💰 LKR ${analytics.money(u.spend)}  ·  🧾 ${u.orders} order${u.orders === 1 ? "" : "s"}`
   );
+}
 
-  const waiting = orders.filter(
-    (o) => o.status === "pending_payment"
+function usersText(orders, page = 0) {
+  const users = analytics.buildUsers(orders);
+  const view = analytics.paginate(users, page, 6);
+
+  const header =
+    `👥 CUSTOMERS\n\n` +
+    `━━━━━━━━━━━━━━━━━━\n\n` +
+    `${users.length} customer${users.length === 1 ? "" : "s"} · ` +
+    `LKR ${analytics.money(users.reduce((t, u) => t + u.spend, 0))} lifetime\n\n` +
+    `━━━━━━━━━━━━━━━━━━\n\n`;
+
+  if (!view.total) {
+    return header + `_No customers yet._`;
+  }
+
+  const body = view.items
+    .map((u, i) => userRow(u, view.page * 6 + i))
+    .join("\n\n");
+
+  const footer = `\n\n━━━━━━━━━━━━━━━━━━\n\n📄 ${view.page + 1} / ${view.pages}`;
+
+  return header + body + footer;
+}
+
+function resultsListText(hits) {
+  return hits
+    .slice(0, 20)
+    .map(
+      (u, i) =>
+        `${i + 1}. ${u.username ? `@${esc(u.username)}` : esc(u.firstName || "—")}\n` +
+        `    💰 LKR ${analytics.money(u.spend)} · 🧾 ${u.orders}`
+    )
+    .join("\n\n");
+}
+
+function usersMenu(page = 0, pages = 1) {
+  const rows = [];
+
+  if (page > 0) {
+    rows.push([
+      Markup.button.callback("⬅️  PREV", `admin_users_p_${page - 1}`),
+    ]);
+  }
+
+  if (page < pages - 1) {
+    rows.push([
+      Markup.button.callback("NEXT  ➡️", `admin_users_p_${page + 1}`),
+    ]);
+  }
+
+  rows.push([
+    Markup.button.callback("🏆  LEADERBOARD", "admin_leaderboard"),
+    Markup.button.callback("🔎  SEARCH", "admin_user_search"),
+  ]);
+
+  rows.push([
+    Markup.button.callback("🔙  Admin Panel", "admin_home"),
+  ]);
+
+  return Markup.inlineKeyboard(rows);
+}
+
+function userDetailText(user, orders) {
+  const mine = orders
+    .filter((o) => o.userId === user.userId)
+    .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+
+  const recent = mine.slice(0, 6);
+
+  const approvalRate = mine.length
+    ? (mine.filter((o) => o.status === "approved").length / mine.length) * 100
+    : 0;
+
+  return (
+    `👤 CUSTOMER PROFILE\n\n` +
+    `━━━━━━━━━━━━━━━━━━\n\n` +
+    `🆔 Telegram ID\n\`${user.userId}\`\n\n` +
+    `👤 Name\n${esc(user.firstName || "—")}\n\n` +
+    `📛 Username\n${user.username ? `@${esc(user.username)}` : "_none_"}\n\n` +
+    `━━━━━━━━━━━━━━━━━━\n\n` +
+    `💰 Lifetime spend\nLKR ${analytics.money(user.spend)}\n\n` +
+    `🧾 Total orders\n${user.orders}\n\n` +
+    `✅ Approved\n${user.approved}\n\n` +
+    `🔍 In flight\n${user.pending}\n\n` +
+    `❌ Rejected\n${user.rejected}\n\n` +
+    `📈 Approval rate\n${approvalRate.toFixed(0)}%\n\n` +
+    `⭐ Favourite\n${user.favourite ? esc(user.favourite) : "—"}\n\n` +
+    `🎮 Games played\n${user.games.length ? user.games.map(esc).join(", ") : "—"}\n\n` +
+    `🕐 First seen\n${analytics.when(user.firstSeen)}\n\n` +
+    `🕑 Last order\n${analytics.when(user.lastSeen)}\n\n` +
+    `━━━━━━━━━━━━━━━━━━\n\n` +
+    `📜 RECENT ORDERS\n\n` +
+    (recent.length
+      ? recent
+          .map(
+            (o) =>
+              `${statusBadge(o.status)}\n` +
+              `\`${esc(o.id)}\` · ${esc(o.productName)}\n` +
+              `LKR ${analytics.money(o.price)} · ${analytics.when(o.createdAt)}`
+          )
+          .join("\n\n")
+      : "_None_")
   );
+}
 
-  const rejected = orders.filter(
-    (o) => o.status === "rejected"
-  );
+/*
+|--------------------------------------------------------------------------
+| CUSTOMER LIST
+|--------------------------------------------------------------------------
+*/
+bot.action("admin_users", async (ctx) => {
+  await ctx.answerCbQuery();
 
-  const revenue = approved.reduce(
-    (total, order) =>
-      total + Number(order.price || 0),
-    0
-  );
+  if (ctx.from.id !== ADMIN_ID) {
+    return ctx.reply("⛔ Admin access only.");
+  }
 
-  await ctx.editMessageText(
-    `📊 SALES STATISTICS
+  const orders = getOrders();
+  const users = analytics.buildUsers(orders);
+  const view = analytics.paginate(users, 0, 6);
 
-🧾 Total Orders:
-${orders.length}
+  await ctx.editMessageText(usersText(orders, 0), {
+    parse_mode: "Markdown",
+    ...usersMenu(0, view.pages),
+  });
+});
 
-━━━━━━━━━━━━━━
+bot.action(/^admin_users_p_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
 
-✅ Approved:
-${approved.length}
+  if (ctx.from.id !== ADMIN_ID) {
+    return ctx.reply("⛔ Admin access only.");
+  }
 
-💰 Approved Revenue:
-LKR ${revenue.toLocaleString()}
+  const page = Number(ctx.match[1]) || 0;
+  const orders = getOrders();
+  const users = analytics.buildUsers(orders);
+  const view = analytics.paginate(users, page, 6);
 
-🔍 Pending Approval:
-${pending.length}
+  await ctx.editMessageText(usersText(orders, page), {
+    parse_mode: "Markdown",
+    ...usersMenu(page, view.pages),
+  });
+});
 
-⏳ Awaiting Payment:
-${waiting.length}
+/*
+|--------------------------------------------------------------------------
+| CUSTOMER PROFILE
+|--------------------------------------------------------------------------
+| The callback carries the id so a profile can be opened directly from a
+| search result or from an order screen.
+*/
+bot.action(/^admin_user_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
 
-❌ Rejected:
-${rejected.length}`,
+  if (ctx.from.id !== ADMIN_ID) {
+    return ctx.reply("⛔ Admin access only.");
+  }
 
-    Markup.inlineKeyboard([
+  const targetId = Number(ctx.match[1]);
+  const orders = getOrders();
+  const users = analytics.buildUsers(orders);
+
+  const user = users.find((u) => u.userId === targetId);
+
+  if (!user) {
+    return ctx.answerCbQuery({ text: "Customer not found.", show_alert: true });
+  }
+
+  await ctx.editMessageText(userDetailText(user, orders), {
+    parse_mode: "Markdown",
+    ...Markup.inlineKeyboard([
       [
         Markup.button.callback(
-          "🔙 Admin Panel",
-          "admin_home"
+          "👥  ALL CUSTOMERS",
+          "admin_users"
         ),
       ],
-    ])
+      [
+        Markup.button.callback("🔙  Admin Panel", "admin_home"),
+      ],
+    ]),
+  });
+});
+
+/*
+|--------------------------------------------------------------------------
+| LEADERBOARD
+|--------------------------------------------------------------------------
+*/
+bot.action("admin_leaderboard", async (ctx) => {
+  await ctx.answerCbQuery();
+
+  if (ctx.from.id !== ADMIN_ID) {
+    return ctx.reply("⛔ Admin access only.");
+  }
+
+  const orders = getOrders();
+  const users = analytics.buildUsers(orders).filter((u) => u.spend > 0);
+
+  if (!users.length) {
+    return ctx.editMessageText(
+      "🏆 LEADERBOARD\n\n_No approved orders yet._",
+      {
+        parse_mode: "Markdown",
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback("🔙  Admin Panel", "admin_home")],
+        ]),
+      }
+    );
+  }
+
+  const view = analytics.paginate(users, 0, 8);
+
+  const podium = users
+    .slice(0, 3)
+    .map(
+      (u, i) =>
+        `${["🥇", "🥈", "🥉"][i]} @${esc(u.username || u.firstName || u.userId)} — ` +
+        `LKR ${analytics.money(u.spend)}`
+    )
+    .join("\n");
+
+  const rest = view.items
+    .map((u, i) => userRow(u, view.page * 8 + i + 3))
+    .join("\n\n");
+
+  await ctx.editMessageText(
+    `🏆 TOP CUSTOMERS\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `${podium}\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `${rest}\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `📄 ${view.page + 1} / ${view.pages}`,
+    {
+      parse_mode: "Markdown",
+      ...Markup.inlineKeyboard([
+        view.page < view.pages - 1
+          ? [Markup.button.callback("NEXT  ➡️", `admin_lb_p_${view.page + 1}`)]
+          : [],
+        [
+          Markup.button.callback("👥  ALL CUSTOMERS", "admin_users"),
+          Markup.button.callback("🔙  Admin Panel", "admin_home"),
+        ],
+      ].filter((row) => row.length)),
+    }
+  );
+});
+
+bot.action(/^admin_lb_p_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery("");
+
+  if (ctx.from.id !== ADMIN_ID) {
+    return ctx.reply("⛔ Admin access only.");
+  }
+
+  const page = Number(ctx.match[1]) || 0;
+  const orders = getOrders();
+  const users = analytics.buildUsers(orders).filter((u) => u.spend > 0);
+
+  if (!users.length) {
+    return ctx.editMessageText("🏆 LEADERBOARD\n\n_No approved orders yet._", {
+      parse_mode: "Markdown",
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback("🔙  Admin Panel", "admin_home")],
+      ]),
+    });
+  }
+
+  const view = analytics.paginate(users, page, 8);
+
+  await ctx.editMessageText(
+    `🏆 TOP CUSTOMERS (${view.page + 1}/${view.pages})\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      view.items.map((u, i) => userRow(u, view.page * 8 + i)).join("\n\n") +
+      `\n\n━━━━━━━━━━━━━━━━━━\n\n` +
+      `💰 Total: LKR ${analytics.money(users.reduce((t, u) => t + u.spend, 0))}`,
+    {
+      parse_mode: "Markdown",
+      ...Markup.inlineKeyboard([
+        view.page > 0
+          ? [Markup.button.callback("⬅️  PREV", `admin_lb_p_${view.page - 1}`)]
+          : [],
+        view.page < view.pages - 1
+          ? [Markup.button.callback("NEXT  ➡️", `admin_lb_p_${view.page + 1}`)]
+          : [],
+        [
+          Markup.button.callback("👥  ALL CUSTOMERS", "admin_users"),
+          Markup.button.callback("🔙  Admin Panel", "admin_home"),
+        ],
+      ].filter((row) => row.length)),
+    }
+  );
+});
+
+/*
+|--------------------------------------------------------------------------
+| CUSTOMER SEARCH
+|--------------------------------------------------------------------------
+*/
+bot.action("admin_user_search", async (ctx) => {
+  await ctx.answerCbQuery();
+
+  if (ctx.from.id !== ADMIN_ID) {
+    return ctx.reply("⛔ Admin access only.");
+  }
+
+  ctx.session.adminFlow = { step: "customer_search" };
+
+  await ctx.reply(
+    `🔎 SEARCH CUSTOMER\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `Send a *username*, *name*, or *Telegram ID*.\n\n` +
+      `Example: \`methsarp\` or \`8278530664\`\n\n` +
+      `Send /admin to cancel.`,
+    {
+      parse_mode: "Markdown",
+      ...cancelFlowButton(),
+    }
   );
 });
 
@@ -3251,14 +3676,22 @@ bot.action("admin_home", async (ctx) => {
     return ctx.reply("⛔ Admin access only.");
   }
 
+  const s = analytics.summarise(getOrders());
+
   await ctx.editMessageText(
-    `👑 ${STORE_NAME}
+    `👑 ${STORE_NAME}\n\n` +
+      `🛠️ ADMIN PANEL\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `🔍 Pending orders: ${s.inFlight}\n` +
+      `👥 Customers: ${s.uniqueUsers}\n` +
+      `💰 Revenue: LKR ${analytics.money(s.revenue)}\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `Select an option below:`,
 
-🛠️ ADMIN PANEL
-
-Select an option below:`,
-
-    adminMenu()
+    {
+      parse_mode: "Markdown",
+      ...adminMenu(),
+    }
   );
 });
 

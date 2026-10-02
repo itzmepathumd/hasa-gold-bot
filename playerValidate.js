@@ -47,20 +47,25 @@ function httpRequest(method, path, body = null) {
       timeout: 15000,
     };
 
+    console.log(`[SHOP2TOPUP] ${method} ${url.pathname}`);
+
     const req = https.request(options, (res) => {
       let data = "";
       res.on("data", (chunk) => { data += chunk; });
       res.on("end", () => {
         try {
           const parsed = data ? JSON.parse(data) : {};
+          console.log(`[SHOP2TOPUP] Response ${res.statusCode}:`, JSON.stringify(parsed).slice(0, 500));
           resolve({ statusCode: res.statusCode, data: parsed, headers: res.headers });
         } catch {
+          console.log(`[SHOP2TOPUP] Response ${res.statusCode} (non-JSON):`, data.slice(0, 500));
           resolve({ statusCode: res.statusCode, data: data, headers: res.headers });
         }
       });
     });
 
     req.on("error", (err) => {
+      console.error(`[SHOP2TOPUP] Request error:`, err.message);
       reject(err);
     });
 
@@ -70,6 +75,7 @@ function httpRequest(method, path, body = null) {
     });
 
     if (body) {
+      console.log(`[SHOP2TOPUP] Request body:`, JSON.stringify(body));
       req.write(JSON.stringify(body));
     }
     req.end();
@@ -166,14 +172,35 @@ async function findBloodStrikeSubcategory(productId) {
 async function validateShop2TopupPlayer(playerId, product) {
   // product is our internal package object with sub_category_id and requirements
   const subCategoryId = product?.sub_category_id;
-  const requirements = product?.requirements || [];
+  const productRequirements = product?.requirements || [];
 
   if (!subCategoryId) {
     return { success: false, error: "CONFIG_MISSING", message: "Sub-category ID not configured for this product", retryable: false };
   }
 
   if (!API_KEY) {
+    console.log("[SHOP2TOPUP] No API key configured");
     return { success: false, error: "CONFIG_MISSING", message: "SHOP2TOPUP API key not configured", retryable: false };
+  }
+
+  console.log(`[SHOP2TOPUP] Validating player ${playerId} for sub_category_id ${subCategoryId}`);
+
+  // Fetch dynamic requirements for this subcategory if not already configured
+  let requirements = productRequirements;
+  if (requirements.length === 0) {
+    try {
+      const fetchedRequirements = await fetchRequirements(subCategoryId);
+      if (fetchedRequirements && fetchedRequirements.length > 0) {
+        console.log(`[SHOP2TOPUP] Fetched requirements for sub_category_id ${subCategoryId}:`, JSON.stringify(fetchedRequirements));
+        // Convert to our format: [{ field_name: "...", value: "..." }]
+        requirements = fetchedRequirements.map((req) => ({
+          field_name: req.field_name || req.name || req.key,
+          value: req.default_value || req.value || req.example || "",
+        })).filter((r) => r.field_name);
+      }
+    } catch (reqErr) {
+      console.warn(`[SHOP2TOPUP] Failed to fetch requirements for ${subCategoryId}:`, reqErr.message);
+    }
   }
 
   // Build request body with all required fields
@@ -182,19 +209,24 @@ async function validateShop2TopupPlayer(playerId, product) {
     player_id: String(playerId),
   };
 
-  // Add any dynamic requirement fields from product config
+  // Add any dynamic requirement fields from product config or fetched requirements
   if (Array.isArray(requirements)) {
     for (const req of requirements) {
-      if (req.field_name && req.value !== undefined) {
+      if (req.field_name && req.value !== undefined && req.value !== "") {
         body[req.field_name] = req.value;
       }
     }
   }
 
+  console.log(`[SHOP2TOPUP] Request body:`, JSON.stringify(body));
+
   try {
     const response = await httpRequest("POST", "/api/endpoints/v1/player/validate", body);
 
     const { statusCode, data } = response;
+
+    // Log full response for debugging
+    console.log(`[SHOP2TOPUP] Full response:`, JSON.stringify(data, null, 2));
 
     // Successful validation
     if (statusCode === 200 && data?.success && data?.player) {
@@ -208,7 +240,9 @@ async function validateShop2TopupPlayer(playerId, product) {
 
     // Handle error codes - use machine-readable 'code' field
     const errorCode = data?.code || data?.error_code || data?.error || "UNKNOWN";
-    const errorMessage = data?.message || "Validation failed";
+    const errorMessage = data?.message || data?.msg || data?.error_message || "Validation failed";
+
+    console.log(`[SHOP2TOPUP] Error code: ${errorCode}, message: ${errorMessage}`);
 
     // Retryable errors
     if (errorCode === "PLAYER_CHECK_UNAVAILABLE" || statusCode === 503) {
@@ -236,8 +270,17 @@ async function validateShop2TopupPlayer(playerId, product) {
       return { success: false, error: "REGION_MISMATCH", message: "Player region does not match product region", retryable: false };
     }
 
-    // Other errors
-    return { success: false, error: errorCode, message: errorMessage, retryable: false };
+    // Handle other common error codes
+    if (errorCode === "INVALID_SUB_CATEGORY" || errorCode === "SUB_CATEGORY_NOT_FOUND") {
+      return { success: false, error: "INVALID_SUB_CATEGORY", message: "Invalid sub-category ID for this product", retryable: false };
+    }
+
+    if (errorCode === "MISSING_REQUIRED_FIELD" || errorCode === "REQUIRED_FIELD_MISSING") {
+      return { success: false, error: "MISSING_REQUIRED_FIELD", message: `Missing required field: ${errorMessage}`, retryable: false };
+    }
+
+    // Other errors - log the actual error code for debugging
+    return { success: false, error: errorCode, message: `API error (${errorCode}): ${errorMessage}`, retryable: false };
 
   } catch (err) {
     // Network/timeout errors
@@ -245,6 +288,7 @@ async function validateShop2TopupPlayer(playerId, product) {
       return { success: false, error: "PLAYER_CHECK_UNAVAILABLE", message: "Verification service unreachable, please try again", retryable: true };
     }
 
+    console.error("[SHOP2TOPUP] Network error:", err.message);
     return { success: false, error: "NETWORK_ERROR", message: "Network error during validation", retryable: true };
   }
 }

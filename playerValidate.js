@@ -55,17 +55,14 @@ function httpRequest(method, path, body = null) {
       res.on("end", () => {
         try {
           const parsed = data ? JSON.parse(data) : {};
-          console.log(`[SHOP2TOPUP] Response ${res.statusCode}:`, JSON.stringify(parsed).slice(0, 500));
           resolve({ statusCode: res.statusCode, data: parsed, headers: res.headers });
         } catch {
-          console.log(`[SHOP2TOPUP] Response ${res.statusCode} (non-JSON):`, data.slice(0, 500));
           resolve({ statusCode: res.statusCode, data: data, headers: res.headers });
         }
       });
     });
 
     req.on("error", (err) => {
-      console.error(`[SHOP2TOPUP] Request error:`, err.message);
       reject(err);
     });
 
@@ -225,22 +222,45 @@ async function validateShop2TopupPlayer(playerId, product) {
 
     const { statusCode, data } = response;
 
-    // Log full response for debugging
-    console.log(`[SHOP2TOPUP] Full response:`, JSON.stringify(data, null, 2));
+    // SHOP2TOPUP returns the player object under `data`, not `player`.
+    // Accept both shapes so the contract is resilient.
+    const player = data?.data?.player || data?.player || data?.data;
 
     // Successful validation
-    if (statusCode === 200 && data?.success && data?.player) {
+    if (statusCode === 200 && data?.success && player && (player.player_id || player.player_name)) {
       return {
         success: true,
-        playerId: data.player.player_id,
-        playerName: data.player.player_name,
-        region: data.player.region || data.player.server || null,
+        playerId: String(player.player_id ?? playerId),
+        playerName: player.player_name ?? "Unknown",
+        region: player.region || player.server || null,
       };
     }
 
-    // Handle error codes - use machine-readable 'code' field
-    const errorCode = data?.code || data?.error_code || data?.error || "UNKNOWN";
-    const errorMessage = data?.message || data?.msg || data?.error_message || "Validation failed";
+    // SHOP2TOPUP returns errors as a nested object:
+    //   { success:false, error: { code, message, action, retryable } }
+    // but flat shapes also occur, so normalise to a string code + message.
+    const errorObj =
+      data?.error && typeof data.error === "object" ? data.error : null;
+
+    const errorCode = String(
+      errorObj?.code ||
+        data?.code ||
+        data?.error_code ||
+        (typeof data?.error === "string" ? data.error : "") ||
+        "UNKNOWN"
+    ).toUpperCase();
+
+    const errorMessage = String(
+      errorObj?.message || data?.message || data?.msg || "Validation failed"
+    );
+
+    // The API tells us whether a retry is worthwhile; trust it when present.
+    const apiRetryable =
+      typeof errorObj?.retryable === "boolean"
+        ? errorObj.retryable
+        : typeof data?.retryable === "boolean"
+          ? data.retryable
+          : null;
 
     console.log(`[SHOP2TOPUP] Error code: ${errorCode}, message: ${errorMessage}`);
 
@@ -253,13 +273,13 @@ async function validateShop2TopupPlayer(playerId, product) {
       return { success: false, error: "PLAYER_BUSY", message: "Player is currently busy, please try again in a moment", retryable: true };
     }
 
-    if (errorCode === "RATE_LIMIT_EXCEEDED") {
+    if (errorCode === "RATE_LIMIT_EXCEEDED" || statusCode === 429) {
       return { success: false, error: "RATE_LIMIT_EXCEEDED", message: "Too many requests, please wait before trying again", retryable: true };
     }
 
     // Non-retryable errors
     if (errorCode === "PLAYER_NOT_FOUND" || statusCode === 404) {
-      return { success: false, error: "PLAYER_NOT_FOUND", message: "Player ID not found in the game", retryable: false };
+      return { success: false, error: "PLAYER_NOT_FOUND", message: errorMessage, retryable: false };
     }
 
     if (errorCode === "INVALID_PARAMETER") {
@@ -279,8 +299,13 @@ async function validateShop2TopupPlayer(playerId, product) {
       return { success: false, error: "MISSING_REQUIRED_FIELD", message: `Missing required field: ${errorMessage}`, retryable: false };
     }
 
-    // Other errors - log the actual error code for debugging
-    return { success: false, error: errorCode, message: `API error (${errorCode}): ${errorMessage}`, retryable: false };
+    // Other errors - keep the API code so the bot can react to it.
+    return {
+      success: false,
+      error: errorCode,
+      message: errorMessage,
+      retryable: apiRetryable === null ? false : apiRetryable,
+    };
 
   } catch (err) {
     // Network/timeout errors

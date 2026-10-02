@@ -1102,8 +1102,6 @@ bot.on("text", async (ctx, next) => {
     return next();
   }
 
-  console.log(`[PLAYER_ID_HANDLER] waitingForPlayerId: ${ctx.session?.waitingForPlayerId}, gameId: ${ctx.session?.gameId}, packageId: ${ctx.session?.packageId}`);
-
   if (!ctx.session?.waitingForPlayerId) {
     return;
   }
@@ -1163,11 +1161,8 @@ bot.on("text", async (ctx, next) => {
       showPercent: true,
     });
 
-    console.log(`[VALIDATION] Starting validation for player ${playerId}, pkg:`, JSON.stringify({ sub_category_id: pkg.sub_category_id, requirements: pkg.requirements }));
-
     // Call the validation API
     const result = await playerValidate.validateShop2TopupPlayer(playerId, pkg);
-    console.log(`[VALIDATION] Result:`, JSON.stringify(result));
 
     if (result.success) {
       playerInfo = {

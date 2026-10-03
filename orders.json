@@ -8,12 +8,15 @@
     "productKey": "elite",
     "productName": "🎫 Strike Pass Elite",
     "price": 1100,
-    "status": "approved",
+    "status": "needs_review",
     "paymentProof": "AgACAgUAAxkBAAMMartByXoN1pdGfDzywy1SbMNH03gAAj8SaxsGWdhVRaofUyxdSXYBAAMCAAN4AAM9BA",
     "createdAt": "2026-09-29T04:42:23.822Z",
     "paymentSubmittedAt": "2026-09-29T04:42:50.366Z",
     "approvedAt": "2026-09-29T04:43:03.442Z",
-    "rejectedAt": null
+    "rejectedAt": null,
+    "previousStatus": "approved",
+    "topupStatus": "needs_review",
+    "topupError": "Interrupted before the supplier request was confirmed"
   },
   {
     "id": "HG-325744-4B76D5",
@@ -24,12 +27,15 @@
     "productKey": "gold300",
     "productName": "💎 300 Gold",
     "price": 850,
-    "status": "approved",
+    "status": "needs_review",
     "paymentProof": "AgACAgUAAxkBAAMbartDNV-hMuPiLdSBwMJtggABYHyrAAJHEmsbBlnYVWe86zxXuzVcAQADAgADeAADPQQ",
     "createdAt": "2026-09-29T04:48:45.744Z",
     "paymentSubmittedAt": "2026-09-29T04:48:54.602Z",
     "approvedAt": "2026-09-29T05:40:41.051Z",
-    "rejectedAt": null
+    "rejectedAt": null,
+    "previousStatus": "approved",
+    "topupStatus": "needs_review",
+    "topupError": "Interrupted before the supplier request was confirmed"
   },
   {
     "id": "HG-734882-11C1EB",
@@ -40,12 +46,15 @@
     "productKey": "gold300",
     "productName": "💎 300 Gold",
     "price": 850,
-    "status": "approved",
+    "status": "needs_review",
     "paymentProof": "AgACAgUAAxkBAANNartcSQtD3ogU_7GDvj1v2hnmT0YAArURaxv3ydhV8kCTkEGqM7QBAAMCAAN5AAM9BA",
     "createdAt": "2026-09-29T06:35:34.882Z",
     "paymentSubmittedAt": "2026-09-29T06:35:53.970Z",
     "approvedAt": "2026-09-29T06:36:23.614Z",
-    "rejectedAt": null
+    "rejectedAt": null,
+    "previousStatus": "approved",
+    "topupStatus": "needs_review",
+    "topupError": "Interrupted before the supplier request was confirmed"
   },
   {
     "id": "HG-993151-8F82DE",
@@ -120,12 +129,15 @@
     "productKey": "elite",
     "productName": "🎫 Strike Pass Elite",
     "price": 1100,
-    "status": "approved",
+    "status": "needs_review",
     "paymentProof": "AgACAgUAAxkBAAIB92q-i1RLFG_UsqM9lrHuEhZNBQssAAK-GWsbnqj5Vda2LLqoSLHiAQADAgADeAADPQQ",
     "createdAt": "2026-10-01T16:32:49.183Z",
     "paymentSubmittedAt": "2026-10-01T16:33:24.554Z",
     "approvedAt": "2026-10-01T16:35:20.009Z",
-    "rejectedAt": null
+    "rejectedAt": null,
+    "previousStatus": "approved",
+    "topupStatus": "needs_review",
+    "topupError": "Interrupted before the supplier request was confirmed"
   },
   {
     "id": "HG-086455-9E8968",
@@ -141,12 +153,15 @@
     "productKey": "weekly",
     "productName": "📅 Weekly",
     "price": 590,
-    "status": "approved",
+    "status": "needs_review",
     "paymentProof": "AgACAgUAAxkBAAIDW2q_2haFGm0l8YdYQL5-qflhxjj9AALmF2sbnqgBVt53PZ7-8Er-AQADAgADdwADPQQ",
     "createdAt": "2026-10-02T16:21:26.455Z",
     "paymentSubmittedAt": "2026-10-02T16:21:42.594Z",
     "approvedAt": "2026-10-02T16:21:52.820Z",
-    "rejectedAt": null
+    "rejectedAt": null,
+    "previousStatus": "approved",
+    "topupStatus": "needs_review",
+    "topupError": "Interrupted before the supplier request was confirmed"
   },
   {
     "id": "HG-282503-1C7954",
@@ -222,10 +237,10 @@
     "productKey": "weekly",
     "productName": "📅 Weekly",
     "price": 590,
-    "status": "pending_payment",
-    "paymentProof": null,
+    "status": "pending_approval",
+    "paymentProof": "AgACAgUAAxkBAAID0mrA09jOdmQDHIPHU-KsurapXfxkAAKDE2sbTigJVmmlxlTFhXaQAQADAgADeQADPQQ",
     "createdAt": "2026-10-03T09:57:45.663Z",
-    "paymentSubmittedAt": null,
+    "paymentSubmittedAt": "2026-10-03T10:07:20.226Z",
     "approvedAt": null,
     "rejectedAt": null,
     "topupStatus": null,

@@ -363,6 +363,78 @@ console.log("\n== add game flow ==");
   await tap(ctx, "flow_cancel");
   check("flow cancelled", !ctx.session.adminFlow);
 
+  console.log("\n== store management without a live session ==");
+
+  // Telegraf leaves ctx.session undefined when an update carries no
+  // usable session key. Writing ctx.session.adminFlow directly threw
+  // "Cannot set properties of undefined" and broke the whole admin store
+  // flow, so these handlers must go through the guard.
+  const sessionless = [
+    ["sage_blood_strike", "edit game"],
+    ["sagee_blood_strike", "change emoji"],
+    ["sagp_blood_strike", "new package"],
+    ["sapay_reload", "view payment"],
+  ];
+
+  for (const [data, label] of sessionless) {
+    const c = makeCtx({ text: undefined });
+
+    // Deliberately no attachSession: ctx.session stays undefined.
+    try {
+      await tap(c, data);
+      check(
+        label + " survives an undefined session",
+        true
+      );
+    } catch (error) {
+      check(
+        label + " survives an undefined session",
+        false,
+        error.message
+      );
+    }
+  }
+
+  const priceCtx = makeCtx({ text: undefined });
+  const somePkg = catalog.getPackages("blood_strike")[0];
+
+  if (somePkg) {
+    try {
+      await tap(
+        priceCtx,
+        `sape_price_blood_strike~${somePkg.id}`
+      );
+      check("update price survives an undefined session", true);
+    } catch (error) {
+      check(
+        "update price survives an undefined session",
+        false,
+        error.message
+      );
+    }
+  }
+
+  console.log("\n== review queue without a live session ==");
+
+  for (const [data, label] of [
+    ["review_queue", "review queue"],
+    ["admin_home", "admin home"],
+    ["admin_pending", "pending orders"],
+  ]) {
+    const c = makeCtx({ text: undefined });
+
+    try {
+      await tap(c, data);
+      check(label + " survives an undefined session", true);
+    } catch (error) {
+      check(
+        label + " survives an undefined session",
+        false,
+        error.message
+      );
+    }
+  }
+
   console.log("\n== cleanup ==");
   catalog.deleteGame(created.id);
   if (pay) catalog.deletePayment(pay.id);

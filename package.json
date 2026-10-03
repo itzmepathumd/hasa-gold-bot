@@ -4,7 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node index.js",
+    "test": "node selftest.js && node flowtest.js && node analytest.js && node deadscan.js && node animtest.js && node abouttest.js && node suppliertest.js && node topuptest.js"
   },
   "keywords": [],
   "author": "",

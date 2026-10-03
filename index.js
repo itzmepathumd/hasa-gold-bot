@@ -7,6 +7,7 @@ const catalog = require("./catalog");
 const playerValidate = require("./playerValidate");
 const analytics = require("./analytics");
 const anim = require("./anim");
+const { SupplierAdapter } = require("./src/supplier");
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_ID = Number(process.env.ADMIN_ID);
@@ -23,7 +24,32 @@ if (!ADMIN_ID) {
 
 const bot = new Telegraf(BOT_TOKEN);
 
-bot.use(session({ defaultSession: () => ({}) }));
+/*
+| Keyed per user so a flow survives updates that carry no chat, such as
+| inline callbacks pressed from a message that is no longer in the chat.
+*/
+bot.use(
+  session({
+    defaultSession: () => ({}),
+    getSessionKey: (ctx) =>
+      ctx.from
+        ? `${ctx.from.id}:${ctx.chat?.id ?? "inline"}`
+        : undefined,
+  })
+);
+
+/*
+| Handlers write flow state through this, because Telegraf leaves
+| ctx.session undefined when an update carries no usable key. Without the
+| guard the store-management flows throw on ctx.session.adminFlow.
+*/
+function ensureSession(ctx) {
+  if (!ctx.session) {
+    ctx.session = {};
+  }
+
+  return ctx.session;
+}
 
 bot.use(async (ctx, next) => {
   console.log(
@@ -46,6 +72,36 @@ bot.use(async (ctx, next) => {
 
   await next();
 });
+
+/*
+|--------------------------------------------------------------------------
+| SUPPLIER
+|--------------------------------------------------------------------------
+| Approving a Free Fire weekly order sends one command to
+| @tikka_auto_top_up_bot:
+|
+|   /id <playerId> <PRODUCT>
+|
+| Every other package has no confirmed supplier name, so those orders go to
+| manual review rather than being sent a guessed command.
+*/
+const supplierAdapter = new SupplierAdapter({
+  commandTemplate: "/id {playerId} {product}",
+
+  // Free Fire "weekly" is the only confirmed supplier product name. Add a
+  // Blood Strike name here only once the supplier states it.
+  productMapping: {
+    weekly: "WEEKLY",
+  },
+
+  responseTimeout: 60000,
+
+  replyLogFile: "./supplier_replies.log",
+
+  productionMode:
+    process.env.SUPPLIER_PRODUCTION_MODE === "true",
+});
+
 const STORE_NAME = "HASA GOLD STORE";
 
 /*
@@ -102,24 +158,236 @@ function paymentInstructions() {
 */
 
 const ORDERS_FILE = "./orders.json";
+const ORDERS_TMP = "./orders.json.tmp";
+const ORDERS_PREV = "./orders.prev.json";
 
 if (!fs.existsSync(ORDERS_FILE)) {
   fs.writeFileSync(ORDERS_FILE, "[]");
 }
 
-function getOrders() {
+/*
+| Every write goes through this chain, so two approvals arriving at once
+| cannot interleave a read-modify-write and lose an order.
+*/
+let ordersWriteChain = Promise.resolve();
+
+/**
+ * Read the order list.
+ *
+ * A corrupt file returns ok:false rather than an empty list. Returning []
+ * on a parse error would make the bot believe it has no orders, and the
+ * next write would then overwrite every real order with nothing.
+ */
+function readOrders() {
+  let raw;
+
   try {
-    return JSON.parse(fs.readFileSync(ORDERS_FILE, "utf8"));
-  } catch {
-    return [];
+    raw = fs.readFileSync(ORDERS_FILE, "utf8");
+  } catch (error) {
+    return { ok: false, orders: [], error: error.message };
+  }
+
+  // A crash can leave a zero-length file behind.
+  if (!raw.trim()) {
+    return { ok: false, orders: [], error: "orders.json is empty" };
+  }
+
+  try {
+    const parsed = JSON.parse(raw);
+
+    if (!Array.isArray(parsed)) {
+      return {
+        ok: false,
+        orders: [],
+        error: "orders.json is not a list",
+      };
+    }
+
+    return { ok: true, orders: parsed, error: null };
+  } catch (error) {
+    return {
+      ok: false,
+      orders: [],
+      error: "orders.json is corrupt: " + error.message,
+    };
   }
 }
 
-function saveOrders(orders) {
-  fs.writeFileSync(
-    ORDERS_FILE,
-    JSON.stringify(orders, null, 2)
+/**
+ * Orders for read-only screens. Returns [] when the file is unreadable so
+ * a listing shows empty instead of crashing, but writes must not use this.
+ */
+function getOrders() {
+  const result = readOrders();
+
+  if (!result.ok) {
+    console.error(
+      `[ORDERS] Refusing to read: ${result.error}`
+    );
+  }
+
+  return result.ok ? result.orders : [];
+}
+
+/**
+ * Write the order list atomically and keep one rollback copy.
+ */
+function writeOrders(orders) {
+  const payload = JSON.stringify(orders, null, 2);
+
+  fs.writeFileSync(ORDERS_TMP, payload);
+
+  // Keep the previous good file so a bad write can be undone by hand.
+  try {
+    if (fs.existsSync(ORDERS_FILE)) {
+      fs.copyFileSync(ORDERS_FILE, ORDERS_PREV);
+    }
+  } catch (error) {
+    console.error(
+      "[ORDERS] Could not save the rollback copy:",
+      error.message
+    );
+  }
+
+  // rename is atomic on the same filesystem, so a reader never sees a
+  // half-written file.
+  fs.renameSync(ORDERS_TMP, ORDERS_FILE);
+}
+
+/**
+ * Run a read-modify-write in order, without racing other writers.
+ */
+function withOrdersLock(task) {
+  const run = ordersWriteChain.then(task, task);
+
+  ordersWriteChain = run.then(
+    () => {},
+    () => {}
   );
+
+  return run;
+}
+
+/**
+ * Change one order by id.
+ *
+ * The mutator receives the stored order and returns the record to persist.
+ * It reports its decision through `decision`, so the object stored is never
+ * a wrapper around the order.
+ */
+async function mutateOrder(orderId, mutator, decision = {}) {
+  return withOrdersLock(async () => {
+    const result = readOrders();
+
+    if (!result.ok) {
+      decision.ok = false;
+      console.error(
+        `[ORDERS] Write blocked: ${result.error}`
+      );
+      await notifyAdminOfStorageFailure(result.error);
+      return null;
+    }
+
+    const index = result.orders.findIndex(
+      (o) => o.id === orderId
+    );
+
+    if (index === -1) {
+      decision.ok = true;
+      decision.found = false;
+      return null;
+    }
+
+    const updated = mutator(result.orders[index], decision);
+
+    if (updated === false) {
+      // The mutator declined, so nothing is written.
+      decision.ok = true;
+      decision.found = true;
+      return result.orders[index];
+    }
+
+    result.orders[index] = updated;
+
+    try {
+      writeOrders(result.orders);
+    } catch (error) {
+      decision.ok = false;
+      console.error(
+        `[ORDERS] Write failed: ${error.message}`
+      );
+      await notifyAdminOfStorageFailure(error.message);
+      return null;
+    }
+
+    decision.ok = true;
+    decision.found = true;
+
+    return result.orders[index];
+  });
+}
+
+/**
+ * Add a new order.
+ */
+async function appendOrder(order) {
+  return withOrdersLock(async () => {
+    const result = readOrders();
+
+    if (!result.ok) {
+      console.error(
+        `[ORDERS] Append blocked: ${result.error}`
+      );
+      await notifyAdminOfStorageFailure(result.error);
+      return null;
+    }
+
+    result.orders.push(order);
+
+    try {
+      writeOrders(result.orders);
+    } catch (error) {
+      console.error(
+        `[ORDERS] Append failed: ${error.message}`
+      );
+      await notifyAdminOfStorageFailure(error.message);
+      return null;
+    }
+
+    return order;
+  });
+}
+
+/**
+ * Tell the admin the order store is unusable, once per distinct reason.
+ */
+const storageAlerts = new Set();
+
+async function notifyAdminOfStorageFailure(reason) {
+  const key = String(reason).slice(0, 80);
+
+  if (storageAlerts.has(key)) {
+    return;
+  }
+
+  storageAlerts.add(key);
+
+  try {
+    await bot.telegram.sendMessage(
+      ADMIN_ID,
+      `🚨 *ORDER STORE UNUSABLE*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `${esc(reason)}\n\n` +
+        `No orders were written. Check \`orders.json\`,\n` +
+        `and restore from \`orders.prev.json\` if needed.`,
+      { parse_mode: "Markdown" }
+    );
+  } catch (error) {
+    console.error(
+      "[ORDERS] Could not send the alert:",
+      error.message
+    );
+  }
 }
 
 /*
@@ -155,6 +423,12 @@ const STATUS_META = {
   approved: { label: "✅ Approved" },
   rejected: { label: "❌ Rejected" },
   cancelled: { label: "🚫 Cancelled" },
+  // Automatic top-up
+  ready_for_topup: { label: "⚡ Ready for Top-up" },
+  topup_processing: { label: "🔄 Top-up Processing" },
+  topup_completed: { label: "✅ Top-up Completed" },
+  topup_failed: { label: "❌ Top-up Failed" },
+  needs_review: { label: "🕵️ Needs Review" },
 };
 
 function statusBadge(status) {
@@ -722,10 +996,10 @@ bot.action(/^pick_(.+)~(.+)$/, async (ctx) => {
 
   const { game, pkg } = found;
 
-  ctx.session.gameId = game.id;
-  ctx.session.packageId = pkg.id;
-  ctx.session.selectedProduct = pkg.id;
-  ctx.session.waitingForPlayerId = true;
+  ensureSession(ctx).gameId = game.id;
+  ensureSession(ctx).packageId = pkg.id;
+  ensureSession(ctx).selectedProduct = pkg.id;
+  ensureSession(ctx).waitingForPlayerId = true;
 
   await anim.revealEdit(
     ctx,
@@ -790,7 +1064,7 @@ bot.on("text", async (ctx, next) => {
   const text = ctx.message.text.trim();
 
   if (flow.step === "customer_search") {
-    ctx.session.adminFlow = null;
+    ensureSession(ctx).adminFlow = null;
 
     const orders = getOrders();
     const users = analytics.buildUsers(orders);
@@ -847,7 +1121,7 @@ bot.on("text", async (ctx, next) => {
   }
 
   if (flow.step === "game_name") {
-    ctx.session.adminFlow = { step: "game_emoji", gameName: text };
+    ensureSession(ctx).adminFlow = { step: "game_emoji", gameName: text };
 
     return ctx.reply(
       `🎮 *NEW GAME*\n\n` +
@@ -868,7 +1142,7 @@ bot.on("text", async (ctx, next) => {
       emoji: text,
     });
 
-    ctx.session.adminFlow = {
+    ensureSession(ctx).adminFlow = {
       step: "package_name",
       gameId: game.id,
     };
@@ -891,7 +1165,7 @@ bot.on("text", async (ctx, next) => {
 
     const game = getGame(flow.gameId);
 
-    ctx.session.adminFlow = null;
+    ensureSession(ctx).adminFlow = null;
 
     return ctx.reply(
       `✅ *${esc(game.name)}* updated.\n\n` +
@@ -917,7 +1191,7 @@ bot.on("text", async (ctx, next) => {
   }
 
   if (flow.step === "package_name") {
-    ctx.session.adminFlow = {
+    ensureSession(ctx).adminFlow = {
       step: "package_price",
       gameId: flow.gameId,
       packageName: text,
@@ -949,7 +1223,7 @@ bot.on("text", async (ctx, next) => {
       );
     }
 
-    ctx.session.adminFlow = {
+    ensureSession(ctx).adminFlow = {
       step: "package_sub_category",
       gameId: flow.gameId,
       packageName: flow.packageName,
@@ -991,7 +1265,7 @@ bot.on("text", async (ctx, next) => {
       }
     }
 
-    ctx.session.adminFlow = {
+    ensureSession(ctx).adminFlow = {
       step: "package_requirements",
       gameId: flow.gameId,
       packageName: flow.packageName,
@@ -1046,7 +1320,7 @@ bot.on("text", async (ctx, next) => {
 
     const game = getGame(flow.gameId);
 
-    ctx.session.adminFlow = null;
+    ensureSession(ctx).adminFlow = null;
 
     return ctx.reply(
       `✅ *${esc(pkg.name)}* added!\n\n` +
@@ -1092,7 +1366,7 @@ bot.on("text", async (ctx, next) => {
 
     const found = catalog.findPackage(flow.gameId, flow.packageId);
 
-    ctx.session.adminFlow = null;
+    ensureSession(ctx).adminFlow = null;
 
     return ctx.reply(
       `✅ *PRICE UPDATED*\n\n` +
@@ -1111,7 +1385,7 @@ bot.on("text", async (ctx, next) => {
 
     const found = catalog.findPackage(flow.gameId, flow.packageId);
 
-    ctx.session.adminFlow = null;
+    ensureSession(ctx).adminFlow = null;
 
     return ctx.reply(
       `✅ *PACKAGE RENAMED*\n\n` +
@@ -1126,7 +1400,7 @@ bot.on("text", async (ctx, next) => {
   }
 
   if (flow.step === "payment_title") {
-    ctx.session.adminFlow = {
+    ensureSession(ctx).adminFlow = {
       step: "payment_lines",
       paymentTitle: text,
       buffer: [],
@@ -1168,7 +1442,7 @@ bot.on("text", async (ctx, next) => {
             lines: flow.buffer,
           });
 
-      ctx.session.adminFlow = null;
+      ensureSession(ctx).adminFlow = null;
 
       return ctx.reply(
         `✅ *${esc(payment.title)}* saved!\n\n` +
@@ -1181,7 +1455,7 @@ bot.on("text", async (ctx, next) => {
       );
     }
 
-    ctx.session.adminFlow.buffer = [
+    ensureSession(ctx).adminFlow.buffer = [
       ...(flow.buffer || []),
       text,
     ];
@@ -1189,7 +1463,7 @@ bot.on("text", async (ctx, next) => {
     return ctx.reply(
       `✅ Added: \`${esc(text)}\`\n\n` +
         `━━━━━━━━━━━━━━━━━━\n\n` +
-        `${ctx.session.adminFlow.buffer
+        `${ensureSession(ctx).adminFlow.buffer
           .map((l, i) => `${i + 1}. ${esc(l)}`)
           .join("\n")}\n\n` +
         `Send more lines or *DONE*.`,
@@ -1205,7 +1479,7 @@ bot.on("text", async (ctx, next) => {
       title: text,
     });
 
-    ctx.session.adminFlow = null;
+    ensureSession(ctx).adminFlow = null;
 
     return ctx.reply(
       `✅ *PAYMENT METHOD RENAMED*\n\n` +
@@ -1218,7 +1492,7 @@ bot.on("text", async (ctx, next) => {
     );
   }
 
-  ctx.session.adminFlow = null;
+  ensureSession(ctx).adminFlow = null;
 
   return next();
 });
@@ -1230,7 +1504,7 @@ bot.action("flow_cancel", async (ctx) => {
     return ctx.reply("⛔ Admin access only.");
   }
 
-  ctx.session.adminFlow = null;
+  ensureSession(ctx).adminFlow = null;
 
   await ctx.reply(
     `❌ *Cancelled*\n\n` +
@@ -1302,8 +1576,8 @@ bot.on("text", async (ctx, next) => {
 
   const playerId = text;
 
-  const gameId = ctx.session.gameId;
-  const packageId = ctx.session.packageId;
+  const gameId = ensureSession(ctx).gameId;
+  const packageId = ensureSession(ctx).packageId;
 
   const found = catalog.findPackage(gameId, packageId);
 
@@ -1409,13 +1683,13 @@ bot.on("text", async (ctx, next) => {
     if (result?.success) {
       // Hold the verified player in session; the order is only placed
       // after the customer taps Confirm.
-      ctx.session.pendingPlayerId = playerId;
-      ctx.session.pendingPlayerInfo = {
+      ensureSession(ctx).pendingPlayerId = playerId;
+      ensureSession(ctx).pendingPlayerInfo = {
         player_id: result.playerId,
         player_name: result.playerName,
         region: result.region,
       };
-      ctx.session.waitingForPlayerId = false;
+      ensureSession(ctx).waitingForPlayerId = false;
 
       await anim.successBeat(ctx, {
         text:
@@ -1447,9 +1721,9 @@ bot.on("text", async (ctx, next) => {
   }
 
   // No validation configured or non-retryable error - proceed to order confirmation
-  ctx.session.playerId = playerId;
-  ctx.session.playerInfo = playerInfo;
-  ctx.session.waitingForPlayerId = false;
+  ensureSession(ctx).playerId = playerId;
+  ensureSession(ctx).playerInfo = playerInfo;
+  ensureSession(ctx).waitingForPlayerId = false;
 
   await sendOrderConfirmation(ctx, game, pkg, playerId, playerInfo, validationError);
 });
@@ -1494,9 +1768,9 @@ bot.action("confirm_player", async (ctx) => {
   const { game, pkg } = found;
 
   // Promote the verified player into the live order session.
-  ctx.session.playerId = playerId;
-  ctx.session.playerInfo = playerInfo;
-  ctx.session.waitingForPlayerId = false;
+  ensureSession(ctx).playerId = playerId;
+  ensureSession(ctx).playerInfo = playerInfo;
+  ensureSession(ctx).waitingForPlayerId = false;
 
   // Drop the verified screen so only the order summary remains.
   try {
@@ -1540,11 +1814,11 @@ bot.action("change_player_id", async (ctx) => {
   const { game, pkg } = found;
 
   // Discard the pending verification and ask for a fresh ID.
-  ctx.session.pendingPlayerId = null;
-  ctx.session.pendingPlayerInfo = null;
-  ctx.session.playerId = null;
-  ctx.session.playerInfo = null;
-  ctx.session.waitingForPlayerId = true;
+  ensureSession(ctx).pendingPlayerId = null;
+  ensureSession(ctx).pendingPlayerInfo = null;
+  ensureSession(ctx).playerId = null;
+  ensureSession(ctx).playerInfo = null;
+  ensureSession(ctx).waitingForPlayerId = true;
 
   // Tidy the verified screen away in place of a dead prompt.
   try {
@@ -1662,16 +1936,36 @@ bot.action("confirm_order", async (ctx) => {
     approvedAt: null,
 
     rejectedAt: null,
+
+    // Automatic top-up tracking. Filled in as the order moves.
+    topupStatus: null,
+    topupAttempts: 0,
+    supplierTransactionId: null,
+    supplierMessageId: null,
+    topupStartedAt: null,
+    topupCompletedAt: null,
+    topupError: null,
+    supplierRawReply: null,
   };
 
-  const orders = getOrders();
+  const created = await appendOrder(order);
 
-  orders.push(order);
+  if (!created) {
+    return ctx.reply(
+      `⚠️ *ORDER NOT SAVED*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `We could not store your order.\n\n` +
+        `Please try again in a moment, or contact\n` +
+        `support with your payment details.`,
+      {
+        parse_mode: "Markdown",
+        ...supportMenu(),
+      }
+    );
+  }
 
-  saveOrders(orders);
-
-  ctx.session.orderId = order.id;
-  ctx.session.waitingForPayment = true;
+  ensureSession(ctx).orderId = order.id;
+  ensureSession(ctx).waitingForPayment = true;
 
   // Confirm button was tapped on the order-summary message: rewrite that
   // message into the payment screen so the flow feels continuous.
@@ -1778,16 +2072,36 @@ Status: ${statusBadge(order.status)}`
   const largestPhoto =
     photos[photos.length - 1];
 
-  order.paymentProof = largestPhoto.file_id;
+  const proof = largestPhoto.file_id;
+  const submittedAt = new Date().toISOString();
 
-  order.status = "pending_approval";
+  const saved = await mutateOrder(order.id, (current) => {
+    if (current.status !== "pending_payment") {
+      return false;
+    }
 
-  order.paymentSubmittedAt =
-    new Date().toISOString();
+    current.paymentProof = proof;
+    current.status = "pending_approval";
+    current.paymentSubmittedAt = submittedAt;
 
-  saveOrders(orders);
+    return current;
+  });
 
-  ctx.session.waitingForPayment = false;
+  if (!saved) {
+    return ctx.reply(
+      `⚠️ *COULD NOT SAVE YOUR PROOF*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `Something went wrong while storing your\n` +
+        `screenshot.\n\n` +
+        `Please send it again, or contact support.`,
+      {
+        parse_mode: "Markdown",
+        ...supportMenu(),
+      }
+    );
+  }
+
+  ensureSession(ctx).waitingForPayment = false;
 
   await anim.stages(ctx, {
     title: "Submitting your payment proof",
@@ -1900,6 +2214,487 @@ PENDING APPROVAL`;
 
 /*
 |--------------------------------------------------------------------------
+| AUTOMATIC TOP-UP
+|--------------------------------------------------------------------------
+| Fulfilment runs after an order is approved.
+|
+| The rules exist to protect a paying customer:
+|
+|   - every transition goes through mutateOrder(), so two approvals at once
+|     cannot overwrite each other,
+|   - an order is claimed by moving it to topup_processing exactly once, so
+|     a double-tapped button cannot send two supplier commands,
+|   - a request whose outcome is unknown is NEVER resent, because the first
+|     one may already have been delivered,
+|   - only an explicitly positive supplier reply counts as delivered;
+|     everything else lands in needs_review for a human.
+|
+| With SUPPLIER_PRODUCTION_MODE=false nothing is sent, so an order settles
+| as needs_review rather than being reported as completed.
+*/
+
+const TOPUP_MAX_ATTEMPTS = 3;
+
+function isTerminalTopup(order) {
+  return (
+    order.topupStatus === "topup_completed" ||
+    order.topupStatus === "topup_failed"
+  );
+}
+
+/**
+ * Send one order to the supplier and settle the result.
+ */
+async function processAutoTopup(orderId) {
+  // The mutator reports its decision through `claim` while still returning
+  // the order itself, so the stored record is never replaced by a wrapper.
+  const claim = { action: null };
+
+  const order = await mutateOrder(orderId, (current) => {
+    if (isTerminalTopup(current)) {
+      claim.action = "terminal";
+      return current;
+    }
+
+    if (
+      current.topupStatus === "topup_processing" ||
+      current.supplierTransactionId
+    ) {
+      // The request already went out, so its outcome is unknown. Never
+      // resend: hand it to a human.
+      claim.action = "in_flight";
+      return current;
+    }
+
+    const attempts = current.topupAttempts || 0;
+
+    if (attempts >= TOPUP_MAX_ATTEMPTS) {
+      current.topupStatus = "topup_failed";
+      current.status = "topup_failed";
+      current.topupError = "Maximum top-up attempts reached";
+      current.topupCompletedAt = new Date().toISOString();
+      claim.action = "exhausted";
+      return current;
+    }
+
+    current.topupStatus = "topup_processing";
+    current.topupAttempts = attempts + 1;
+    current.topupStartedAt = new Date().toISOString();
+    current.topupError = null;
+    claim.action = "claimed";
+
+    return current;
+  });
+
+  if (!order) {
+    console.error(
+      `[AUTO-TOPUP] Order ${orderId} not found or not saved`
+    );
+    return;
+  }
+
+  if (claim.action === "terminal") {
+    console.log(
+      `[AUTO-TOPUP] Order ${orderId} already finished, skipping`
+    );
+    return;
+  }
+
+  if (claim.action === "in_flight") {
+    console.log(
+      `[AUTO-TOPUP] Order ${orderId} already requested, parking for review`
+    );
+    await recoverTopupStatus(orderId);
+    return;
+  }
+
+  if (claim.action === "exhausted") {
+    await notifyTopupResult(order, "failed");
+    return;
+  }
+
+  // The supplier request and the "processing" notice are independent, so
+  // they run together instead of making the customer wait out the
+  // animation before fulfilment even starts.
+  const request = supplierAdapter
+    .sendTopup(order)
+    .then(
+      (value) => ({ ok: true, value }),
+      (error) => ({ ok: false, error })
+    );
+
+  await notifyCustomer(order, {
+    title: "⚡ TOP-UP PROCESSING",
+    body:
+      `🚀 Your top-up is now being processed.\n\n` +
+      `🎮 ${esc(order.gameName)}\n` +
+      `🆔 Player ID: ${esc(order.playerId)}\n` +
+      `📦 Product: ${esc(order.productName)}\n\n` +
+      `⏳ Please wait while we complete it...\n\n` +
+      `Thank you for using ${STORE_NAME}!`,
+  });
+
+  const outcome = await request;
+
+  if (!outcome.ok) {
+    console.error(
+      `[AUTO-TOPUP] Order ${orderId} error:`,
+      outcome.error.message
+    );
+
+    const parked = await mutateOrder(orderId, (current) => {
+      if (isTerminalTopup(current)) {
+        return current;
+      }
+
+      // The command may still have reached the supplier, so this is
+      // deliberately not a failure: a human decides.
+      current.topupError = outcome.error.message;
+      current.topupStatus = "needs_review";
+      current.status = "needs_review";
+
+      return current;
+    });
+
+    if (parked) {
+      await notifyTopupResult(parked, "pending");
+    }
+
+    return;
+  }
+
+  const result = outcome.value;
+
+  const applied = await mutateOrder(orderId, (current) => {
+    if (isTerminalTopup(current)) {
+      return current;
+    }
+
+    current.supplierTransactionId =
+      result.transactionId || current.supplierTransactionId;
+    current.supplierMessageId =
+      result.messageId || current.supplierMessageId;
+
+    if (result.rawResponse) {
+      current.supplierRawReply = result.rawResponse;
+    }
+
+    if (result.success) {
+      current.topupStatus = "topup_completed";
+      current.status = "topup_completed";
+      current.topupCompletedAt = new Date().toISOString();
+      current.topupError = null;
+      return current;
+    }
+
+    current.topupError =
+      result.statusDetail || result.status || "Unknown error";
+
+    // Processing, an unrecognised reply, or a timeout all mean the outcome
+    // is not yet known. Retrying could charge the customer twice, so the
+    // order is parked instead.
+    if (result.status !== "failed") {
+      current.topupStatus = "needs_review";
+      current.status = "needs_review";
+      return current;
+    }
+
+    current.topupStatus = "topup_failed";
+    current.status = "topup_failed";
+    current.topupCompletedAt = new Date().toISOString();
+
+    return current;
+  });
+
+  if (!applied) {
+    return;
+  }
+
+  await notifyTopupResult(
+    applied,
+    applied.topupStatus === "topup_completed"
+      ? "completed"
+      : applied.topupStatus === "topup_failed"
+        ? "failed"
+        : "pending"
+  );
+}
+
+/*
+|--------------------------------------------------------------------------
+| RECOVER TOP-UP STATUS
+|--------------------------------------------------------------------------
+| Resolves a request that is already with the supplier. It never sends a
+| new request, so an uncertain outcome stays uncertain instead of being paid
+| for twice.
+*/
+async function recoverTopupStatus(orderId) {
+  const order = getOrders().find(
+    (o) => o.id === orderId
+  );
+
+  if (!order || isTerminalTopup(order)) {
+    return;
+  }
+
+  if (
+    !order.supplierTransactionId &&
+    !order.supplierMessageId
+  ) {
+    await settleForReview(
+      orderId,
+      "Supplier request state is unknown"
+    );
+    return;
+  }
+
+  let result;
+
+  try {
+    result = await supplierAdapter.checkTopupStatus(order);
+  } catch (error) {
+    console.error(
+      `[RECOVERY] Order ${orderId} lookup failed:`,
+      error.message
+    );
+    return;
+  }
+
+  // The supplier has no status command, so this is the expected path.
+  if (result.status !== "success" && result.status !== "failed") {
+    await settleForReview(orderId, null);
+    return;
+  }
+
+  const applied = await mutateOrder(orderId, (current) => {
+    if (isTerminalTopup(current)) {
+      return current;
+    }
+
+    if (result.status === "success") {
+      current.topupStatus = "topup_completed";
+      current.status = "topup_completed";
+      current.topupCompletedAt = new Date().toISOString();
+      current.topupError = null;
+      return current;
+    }
+
+    current.topupStatus = "topup_failed";
+    current.status = "topup_failed";
+    current.topupError =
+      result.statusDetail || "Supplier reported failure";
+    current.topupCompletedAt = new Date().toISOString();
+
+    return current;
+  });
+
+  if (!applied) {
+    return;
+  }
+
+  await notifyTopupResult(
+    applied,
+    applied.topupStatus === "topup_completed"
+      ? "completed"
+      : "failed"
+  );
+}
+
+/*
+|--------------------------------------------------------------------------
+| SETTLE FOR REVIEW
+|--------------------------------------------------------------------------
+| Parks an order whose supplier outcome cannot be determined.
+*/
+async function settleForReview(orderId, reason) {
+  const applied = await mutateOrder(orderId, (current) => {
+    if (isTerminalTopup(current)) {
+      return current;
+    }
+
+    current.topupStatus = "needs_review";
+    current.status = "needs_review";
+    current.topupError = reason;
+
+    return current;
+  });
+
+  if (applied) {
+    await notifyTopupResult(applied, "pending");
+  }
+}
+
+/*
+|--------------------------------------------------------------------------
+| TOP-UP RESULT NOTIFICATION
+|--------------------------------------------------------------------------
+| Tells the customer where the order stands. "pending" keeps the order open
+| for manual review instead of claiming a failure we cannot prove.
+*/
+async function notifyTopupResult(order, resultType) {
+  if (resultType === "completed") {
+    await notifyCustomer(order, {
+      title: "🎉 TOP-UP COMPLETED!",
+      body:
+        `✅ Your top-up has been delivered.\n\n` +
+        `🎮 ${esc(order.gameName)}\n` +
+        `🆔 Player ID: ${esc(order.playerId)}\n` +
+        `📦 Product: ${esc(order.productName)}\n\n` +
+        `Thank you for using ${STORE_NAME}!`,
+    });
+
+    return;
+  }
+
+  if (resultType === "failed") {
+    await notifyCustomer(order, {
+      title: "❌ TOP-UP FAILED",
+      body:
+        `⚠️ We could not complete your top-up.\n\n` +
+        `🆔 Player ID: ${esc(order.playerId)}\n` +
+        `📦 Product: ${esc(order.productName)}\n\n` +
+        (order.topupError
+          ? `Reason: ${esc(order.topupError)}\n\n`
+          : "") +
+        `👨‍💻 Our support team will look into this and\n` +
+        `get back to you shortly.\n\n` +
+        `Thank you for using ${STORE_NAME}!`,
+    });
+
+    return;
+  }
+
+  await notifyCustomer(order, {
+    title: "⏳ TOP-UP UNDER REVIEW",
+    body:
+      `Your order is confirmed and our team is\n` +
+      `completing it now.\n\n` +
+      `🎮 ${esc(order.gameName)}\n` +
+      `🆔 Player ID: ${esc(order.playerId)}\n` +
+      `📦 Product: ${esc(order.productName)}\n\n` +
+      `⏳ We will update you as soon as it is done.\n\n` +
+      `Thank you for using ${STORE_NAME}!`,
+  });
+}
+
+/*
+|--------------------------------------------------------------------------
+| STARTUP RECOVERY
+|--------------------------------------------------------------------------
+| Orders that were mid-flight when the process stopped are parked for a
+| human, never resent.
+*/
+async function runStartupRecovery() {
+  console.log("[STARTUP] Checking for unfinished top-ups...");
+
+  const pending = getOrders().filter(
+    (order) =>
+      order.topupStatus === "topup_processing" ||
+      order.topupStatus === "ready_for_topup" ||
+      order.status === "needs_review"
+  );
+
+  if (pending.length === 0) {
+    console.log("[STARTUP] Nothing to recover");
+    return;
+  }
+
+  console.log(
+    `[STARTUP] ${pending.length} order(s) need attention`
+  );
+
+  for (const order of pending) {
+    if (
+      order.supplierTransactionId ||
+      order.supplierMessageId
+    ) {
+      await recoverTopupStatus(order.id);
+      continue;
+    }
+
+    console.warn(
+      `[STARTUP] Order ${order.id}: supplier state unknown`
+    );
+
+    await mutateOrder(order.id, (current) => {
+      if (isTerminalTopup(current)) {
+        return current;
+      }
+
+      current.topupStatus = "needs_review";
+      current.status = "needs_review";
+      current.topupError =
+        "Interrupted before the supplier request was confirmed";
+
+      return current;
+    });
+  }
+
+  await notifyAdminOfReview();
+}
+
+/*
+|--------------------------------------------------------------------------
+| ADMIN REVIEW NOTICE
+|--------------------------------------------------------------------------
+| Lists the orders automation could not settle.
+*/
+async function notifyAdminOfReview() {
+  const reviewing = reviewingOrders();
+
+  if (reviewing.length === 0) {
+    return;
+  }
+
+  const lines = reviewing
+    .slice(0, 10)
+    .map(
+      (order) =>
+        `🧾 ${esc(order.id)}\n` +
+        `   ${esc(order.productName)}\n` +
+        `   ${esc(order.topupError || "no supplier reply")}`
+    )
+    .join("\n\n");
+
+  try {
+    await bot.telegram.sendMessage(
+      ADMIN_ID,
+      `🕵️ *TOP-UP NEEDS REVIEW*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `${reviewing.length} order(s) could not be confirmed\n` +
+        `automatically:\n\n${lines}\n\n` +
+        `Use /review to resolve them.`,
+      {
+        parse_mode: "Markdown",
+        ...Markup.inlineKeyboard([
+          [
+            Markup.button.callback(
+              "🕵️  OPEN REVIEW QUEUE",
+              "review_queue"
+            ),
+          ],
+        ]),
+      }
+    );
+  } catch (error) {
+    console.error(
+      "[STARTUP] Could not send the review notice:",
+      error.message
+    );
+  }
+}
+
+/**
+ * Orders waiting for a human decision.
+ */
+function reviewingOrders() {
+  return getOrders().filter(
+    (order) => order.status === "needs_review"
+  );
+}
+
+/*
+|--------------------------------------------------------------------------
 | APPROVE ORDER
 |--------------------------------------------------------------------------
 */
@@ -1913,34 +2708,61 @@ bot.action(/^approve_(.+)$/, async (ctx) => {
     );
   }
 
-  const orderId = ctx.match[1];
+const orderId = ctx.match[1];
 
-  const orders = getOrders();
+  // Approve and hand over to fulfilment in one atomic step, so a
+  // double-tapped button cannot start two top-ups.
+  const decision = { action: null };
 
-  const order = orders.find(
-    (o) => o.id === orderId
+  const approved = await mutateOrder(
+    orderId,
+    (current) => {
+      if (current.status !== "pending_approval") {
+        decision.action = "handled";
+        return current;
+      }
+
+      current.status = "approved";
+      current.approvedAt = new Date().toISOString();
+      current.topupStatus = "ready_for_topup";
+      current.topupAttempts = 0;
+      current.supplierTransactionId = null;
+      current.supplierMessageId = null;
+      current.topupStartedAt = null;
+      current.topupCompletedAt = null;
+      current.topupError = null;
+      current.supplierRawReply = null;
+      decision.action = "approved";
+
+      return current;
+    },
+    decision
   );
 
-  if (!order) {
+  if (!approved) {
     return ctx.reply(
-      "❌ Order not found."
+      "❌ Order could not be saved, so nothing was approved."
     );
   }
 
-  if (order.status !== "pending_approval") {
+  if (decision.action === "handled") {
     return ctx.reply(
       `⚠️ This order has already been processed.
 
-Status: ${statusBadge(order.status)}`
+Status: ${statusBadge(approved.status)}`
     );
   }
 
-  order.status = "approved";
+  // Only Free Fire weekly has a confirmed supplier name. Anything else is
+  // handled by a person, so the customer is not told a top-up is running.
+  const automated = supplierAdapter.canFulfill(approved);
 
-  order.approvedAt =
-    new Date().toISOString();
-
-  saveOrders(orders);
+  if (!automated) {
+    await settleForReview(
+      orderId,
+      "No confirmed supplier product for this package"
+    );
+  }
 
   // Edit the admin's message in place.
   await editOrderNotice(
@@ -1948,36 +2770,45 @@ Status: ${statusBadge(order.status)}`
     `✅ ORDER APPROVED
 
 🧾 Order:
-${esc(order.id)}
+${esc(approved.id)}
 
-🎮 ${esc(order.gameName || "Blood Strike")}
+🎮 ${esc(approved.gameName)}
 
 📦 Product:
-${esc(order.productName)}
+${esc(approved.productName)}
 
 🆔 Player ID:
-${esc(order.playerId)}
+${esc(approved.playerId)}
 
 💰 Amount:
-LKR ${order.price.toLocaleString()}
+LKR ${approved.price.toLocaleString()}
 
 👤 Customer:
-${order.firstName}
+${esc(approved.firstName)}
 
-━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━
 
 Status:
-✅ APPROVED`
+${automated ? "⚡ APPROVED - Top-up starting" : "🕵️ APPROVED - Needs manual review"}`
   );
 
   // Customer gets a staged notification.
-  await notifyCustomer(order, {
+  await notifyCustomer(approved, {
     title: "🎉 PAYMENT APPROVED!",
-    body:
-      `✅ Your payment has been approved.\n\n` +
-      `🚀 Your top-up will now be processed.\n\n` +
-      `Thank you for using ${STORE_NAME}!`,
+    body: automated
+      ? `✅ Your payment has been approved.\n\n` +
+        `🚀 Your top-up is now being processed.\n\n` +
+        `Thank you for using ${STORE_NAME}!`
+      : `✅ Your payment has been approved.\n\n` +
+        `👨‍💻 Our team is completing your order now.\n\n` +
+        `We will notify you the moment it is done.\n\n` +
+        `Thank you for using ${STORE_NAME}!`,
   });
+
+  if (automated) {
+    // Fulfilment runs in the background so the admin is not held waiting.
+    setImmediate(() => processAutoTopup(orderId));
+  }
 });
 
 /*
@@ -2017,12 +2848,24 @@ Status: ${statusBadge(order.status)}`
     );
   }
 
-  order.status = "rejected";
+  const rejectedAt = new Date().toISOString();
 
-  order.rejectedAt =
-    new Date().toISOString();
+  const rejected = await mutateOrder(order.id, (current) => {
+    if (current.status !== "pending_approval") {
+      return false;
+    }
 
-  saveOrders(orders);
+    current.status = "rejected";
+    current.rejectedAt = rejectedAt;
+
+    return current;
+  });
+
+  if (!rejected) {
+    return ctx.reply(
+      "❌ This order could not be updated."
+    );
+  }
 
   await editOrderNotice(
     ctx,
@@ -2136,6 +2979,404 @@ bot.command("admin", async (ctx) => {
   });
 });
 
+bot.command("review", async (ctx) => {
+  if (ctx.from.id !== ADMIN_ID) {
+    return ctx.reply("⛔ Admin access only.");
+  }
+
+  await ctx.reply(reviewQueueText(), {
+    parse_mode: "Markdown",
+    ...reviewMenu(),
+  });
+});
+
+/*
+|--------------------------------------------------------------------------
+| REVIEW QUEUE
+|--------------------------------------------------------------------------
+| Every order automation could not settle with certainty. The customer is
+| told the order is being completed by the team; a human confirms the
+| outcome here.
+*/
+function reviewQueueText() {
+  const reviewing = reviewingOrders();
+
+  if (reviewing.length === 0) {
+    return (
+      `🕵️ *REVIEW QUEUE*\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `✅ Nothing is waiting for review.\n\n` +
+      `Every top-up was settled automatically.`
+    );
+  }
+
+  let text =
+    `🕵️ *REVIEW QUEUE*\n` +
+    `━━━━━━━━━━━━━━━━━━\n\n` +
+    `⚠️ ${reviewing.length} order(s) need a decision:\n\n`;
+
+  for (const order of reviewing.slice(0, 10)) {
+    text +=
+      `🧾 ${esc(order.id)}\n` +
+      `🎮 ${esc(order.gameName)}\n` +
+      `📦 ${esc(order.productName)}\n` +
+      `🆔 \`${esc(order.playerId)}\`\n` +
+      `💬 ${esc(order.topupError || "no supplier reply")}\n\n`;
+  }
+
+  if (reviewing.length > 10) {
+    text += `…and ${reviewing.length - 10} more.\n\n`;
+  }
+
+  text += `👇 Open an order to resolve it:`;
+
+  return text;
+}
+
+function reviewMenu() {
+  const reviewing = reviewingOrders().slice(0, 10);
+
+  const buttons = reviewing.map((order) => [
+    Markup.button.callback(
+      `🧾 ${order.id}`,
+      `review_order_${order.id}`
+    ),
+  ]);
+
+  buttons.push([
+    Markup.button.callback("👑  ADMIN PANEL", "admin_home"),
+  ]);
+
+  return Markup.inlineKeyboard(buttons);
+}
+
+function reviewOrderScreen(order) {
+  const attempts = order.topupAttempts || 0;
+  const automated = supplierAdapter.canFulfill(order);
+
+  return (
+    `🕵️ *REVIEW ORDER*\n` +
+    `━━━━━━━━━━━━━━━━━━\n\n` +
+    `🧾 Order:\n\`${esc(order.id)}\`\n\n` +
+    `🎮 ${esc(order.gameName)}\n\n` +
+    `📦 Product:\n${esc(order.productName)}\n\n` +
+    `🆔 Player ID:\n\`${esc(order.playerId)}\`\n\n` +
+    `💰 Amount:\nLKR ${esc(order.price)}\n\n` +
+    `👤 Customer:\n${esc(order.firstName)} (@${esc(order.username || "unknown")})\n\n` +
+    `━━━━━━━━━━━━━━━━━━\n\n` +
+    `🤖 *AUTOMATION*\n\n` +
+    `📤 Attempts: ${attempts} of ${TOPUP_MAX_ATTEMPTS}\n` +
+    `📦 Automated: ${automated ? "yes" : "no (no confirmed supplier name)"}\n` +
+    (order.supplierTransactionId
+      ? `🔖 Transaction:\n\`${esc(order.supplierTransactionId)}\`\n`
+      : "") +
+    (order.supplierRawReply
+      ? `💬 Supplier replied:\n\`${esc(
+          order.supplierRawReply.slice(0, 120)
+        )}\`\n`
+      : "") +
+    `⚠️ Reason:\n${esc(order.topupError || "not recorded")}\n\n` +
+    `━━━━━━━━━━━━━━━━━━\n\n` +
+    `👇 Check with the supplier first, then pick an outcome.`
+  );
+}
+
+function reviewOrderMenu(order, { canRetry } = { canRetry: false }) {
+  const buttons = [];
+
+  if (order.paymentProof) {
+    buttons.push([
+      Markup.button.callback(
+        `🖼  VIEW PROOF`,
+        `review_proof_${order.id}`
+      ),
+    ]);
+  }
+
+  buttons.push([
+    Markup.button.callback(
+      `✅  MARK DELIVERED`,
+      `review_done_${order.id}`
+    ),
+  ]);
+
+  buttons.push([
+    Markup.button.callback(
+      `❌  MARK FAILED`,
+      `review_fail_${order.id}`
+    ),
+  ]);
+
+  // A retry can send a second supplier command, so it is only offered
+  // while attempts remain and the admin has confirmed the earlier attempt
+  // never reached the supplier.
+  if (canRetry) {
+    buttons.push([
+      Markup.button.callback(
+        `🔄  RETRY TOP-UP`,
+        `review_retry_${order.id}`
+      ),
+    ]);
+  }
+
+  buttons.push([
+    Markup.button.callback("🕵️  REVIEW QUEUE", "review_queue"),
+  ]);
+
+  return Markup.inlineKeyboard(buttons);
+}
+
+function canRetryTopup(order) {
+  if (order.status !== "needs_review") {
+    return false;
+  }
+
+  return (order.topupAttempts || 0) < TOPUP_MAX_ATTEMPTS;
+}
+
+/*
+|--------------------------------------------------------------------------
+| OPEN A REVIEW ORDER
+|--------------------------------------------------------------------------
+*/
+bot.action(/^review_order_(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+
+  if (ctx.from.id !== ADMIN_ID) {
+    return ctx.reply("⛔ Admin access only.");
+  }
+
+  const order = getOrders().find(
+    (o) => o.id === ctx.match[1]
+  );
+
+  if (!order) {
+    return ctx.reply("❌ Order not found.");
+  }
+
+  await ctx.editMessageText(reviewOrderScreen(order), {
+    parse_mode: "Markdown",
+    ...reviewOrderMenu(order, {
+      canRetry: canRetryTopup(order),
+    }),
+  });
+});
+
+bot.action("review_queue", async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+
+  if (ctx.from.id !== ADMIN_ID) {
+    return ctx.reply("⛔ Admin access only.");
+  }
+
+  await ctx.editMessageText(reviewQueueText(), {
+    parse_mode: "Markdown",
+    ...reviewMenu(),
+  });
+});
+
+bot.action(/^review_proof_(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+
+  if (ctx.from.id !== ADMIN_ID) {
+    return ctx.reply("⛔ Admin access only.");
+  }
+
+  const order = getOrders().find(
+    (o) => o.id === ctx.match[1]
+  );
+
+  if (!order?.paymentProof) {
+    return ctx.reply("❌ No payment proof for this order.");
+  }
+
+  return ctx.replyWithPhoto(order.paymentProof, {
+    caption:
+      `🧾 ${esc(order.id)}\n` +
+      `📦 ${esc(order.productName)}\n` +
+      `🆔 \`${esc(order.playerId)}\`\n` +
+      `💰 LKR ${esc(order.price)}`,
+  });
+});
+
+/*
+|--------------------------------------------------------------------------
+| MARK DELIVERED
+|--------------------------------------------------------------------------
+*/
+bot.action(/^review_done_(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+
+  if (ctx.from.id !== ADMIN_ID) {
+    return ctx.reply("⛔ Admin access only.");
+  }
+
+  const orderId = ctx.match[1];
+
+  const applied = await mutateOrder(orderId, (current) => {
+    if (isTerminalTopup(current)) {
+      return current;
+    }
+
+    current.topupStatus = "topup_completed";
+    current.status = "topup_completed";
+    current.topupCompletedAt = new Date().toISOString();
+    current.topupError = null;
+    current.resolvedBy = "admin_marked_delivered";
+    current.resolvedAt = new Date().toISOString();
+
+    return current;
+  });
+
+  if (!applied) {
+    return ctx.reply("❌ Order could not be updated.");
+  }
+
+  await notifyTopupResult(applied, "completed");
+
+  await ctx.editMessageText(
+    `✅ *MARKED DELIVERED*\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `🧾 \`${esc(applied.id)}\`\n\n` +
+      `The customer has been told their top-up\n` +
+      `is complete.`,
+    {
+      parse_mode: "Markdown",
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback("🕵️  REVIEW QUEUE", "review_queue")],
+      ]),
+    }
+  );
+});
+
+/*
+|--------------------------------------------------------------------------
+| MARK FAILED
+|--------------------------------------------------------------------------
+*/
+bot.action(/^review_fail_(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+
+  if (ctx.from.id !== ADMIN_ID) {
+    return ctx.reply("⛔ Admin access only.");
+  }
+
+  const orderId = ctx.match[1];
+
+  const applied = await mutateOrder(orderId, (current) => {
+    if (isTerminalTopup(current)) {
+      return current;
+    }
+
+    current.topupStatus = "topup_failed";
+    current.status = "topup_failed";
+    current.topupCompletedAt = new Date().toISOString();
+    current.topupError = "Confirmed unsuccessful by admin";
+    current.resolvedBy = "admin_marked_failed";
+    current.resolvedAt = new Date().toISOString();
+
+    return current;
+  });
+
+  if (!applied) {
+    return ctx.reply("❌ Order could not be updated.");
+  }
+
+  await notifyTopupResult(applied, "failed");
+
+  await ctx.editMessageText(
+    `❌ *MARKED FAILED*\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `🧾 \`${esc(applied.id)}\`\n\n` +
+      `The customer has been asked to contact support\n` +
+      `for a refund.`,
+    {
+      parse_mode: "Markdown",
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback("🕵️  REVIEW QUEUE", "review_queue")],
+      ]),
+    }
+  );
+});
+
+/*
+|--------------------------------------------------------------------------
+| RETRY TOP-UP
+|--------------------------------------------------------------------------
+| Sends a second supplier command, so it is only offered while attempts
+| remain. The admin must confirm with the supplier first: if the earlier
+| command did go through, retrying delivers twice.
+*/
+bot.action(/^review_retry_(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+
+  if (ctx.from.id !== ADMIN_ID) {
+    return ctx.reply("⛔ Admin access only.");
+  }
+
+  const orderId = ctx.match[1];
+
+  const order = getOrders().find((o) => o.id === orderId);
+
+  if (!order) {
+    return ctx.reply("❌ Order not found.");
+  }
+
+  if (!canRetryTopup(order)) {
+    return ctx.reply(
+      `⚠️ This order cannot be retried.
+
+Status: ${statusBadge(order.status)}
+Attempts: ${order.topupAttempts || 0} of ${TOPUP_MAX_ATTEMPTS}`
+    );
+  }
+
+  if (!supplierAdapter.canFulfill(order)) {
+    return ctx.reply(
+      `⚠️ No confirmed supplier product name for this\n` +
+        `package, so it cannot be sent automatically.\n\n` +
+        `Complete or fail it by hand.`
+    );
+  }
+
+  await ctx.answerCbQuery().catch(() => {});
+
+  // Clear the parked state so processAutoTopup will claim the order again.
+  const prepared = await mutateOrder(orderId, (current) => {
+    if (current.status !== "needs_review") {
+      return false;
+    }
+
+    current.topupStatus = "ready_for_topup";
+    current.supplierTransactionId = null;
+    current.supplierMessageId = null;
+
+    return current;
+  });
+
+  if (!prepared) {
+    return ctx.reply(
+      "⚠️ This order is no longer waiting for review."
+    );
+  }
+
+  await ctx.editMessageText(
+    `🔄 *RETRYING*\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `🧾 \`${esc(orderId)}\`\n\n` +
+      `Attempt ${(prepared.topupAttempts || 0) + 1} of ` +
+      `${TOPUP_MAX_ATTEMPTS} is starting.`,
+    {
+      parse_mode: "Markdown",
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback("🕵️  REVIEW QUEUE", "review_queue")],
+      ]),
+    }
+  );
+
+  setImmediate(() => processAutoTopup(orderId));
+});
+
 /*
 |--------------------------------------------------------------------------
 | ADMIN PANEL
@@ -2147,6 +3388,12 @@ function adminMenu() {
       Markup.button.callback(
         "🔍  PENDING ORDERS",
         "admin_pending"
+      ),
+    ],
+    [
+      Markup.button.callback(
+        "🕵️  REVIEW QUEUE",
+        "review_queue"
       ),
     ],
     [
@@ -2504,7 +3751,7 @@ bot.action(/^sapay_(.+)$/, async (ctx) => {
   }
 
   if (ctx.match[1] === "new") {
-    ctx.session.adminFlow = { step: "payment_title" };
+    ensureSession(ctx).adminFlow = { step: "payment_title" };
 
     return ctx.reply(
       `➕ *ADD PAYMENT METHOD*\n\n` +
@@ -2631,7 +3878,7 @@ bot.action(/^sapaye_(.+)$/, async (ctx) => {
     return ctx.reply("❌ Payment method not found.");
   }
 
-  ctx.session.adminFlow = {
+  ensureSession(ctx).adminFlow = {
     step: "payment_lines",
     paymentId: payment.id,
     buffer: [],
@@ -2666,7 +3913,7 @@ bot.action(/^sapayr_(.+)$/, async (ctx) => {
     return ctx.reply("❌ Payment method not found.");
   }
 
-  ctx.session.adminFlow = {
+  ensureSession(ctx).adminFlow = {
     step: "payment_rename",
     paymentId: payment.id,
   };
@@ -2963,7 +4210,7 @@ bot.action("sag_new", async (ctx) => {
     return ctx.reply("⛔ Admin access only.");
   }
 
-  ctx.session.adminFlow = { step: "game_name" };
+  ensureSession(ctx).adminFlow = { step: "game_name" };
 
   await ctx.reply(
     `➕ *ADD NEW GAME*\n\n` +
@@ -3047,7 +4294,7 @@ bot.action(/^sagd_(.+)$/, async (ctx) => {
     return ctx.reply("❌ Game not found.");
   }
 
-  ctx.session.pendingDelete = { type: "game", id: game.id };
+  ensureSession(ctx).pendingDelete = { type: "game", id: game.id };
 
   await ctx.reply(
     `⚠️ *DELETE GAME*\n\n` +
@@ -3785,7 +5032,7 @@ bot.action("admin_user_search", async (ctx) => {
     return ctx.reply("⛔ Admin access only.");
   }
 
-  ctx.session.adminFlow = { step: "customer_search" };
+  ensureSession(ctx).adminFlow = { step: "customer_search" };
 
   await ctx.reply(
     `🔎 SEARCH CUSTOMER\n\n` +
@@ -3870,21 +5117,71 @@ bot.telegram.setMyCommands([
     description: "ℹ️ Developer & contact",
   },
   {
+    command: "review",
+    description: "🕵️ Review unresolved top-ups",
+  },
+  {
     command: "admin",
     description: "👑 Admin panel",
   },
 ]);
+
 /*
 |--------------------------------------------------------------------------
 | START BOT
 |--------------------------------------------------------------------------
+| Every handler is registered before the bot connects, so the supplier
+| client and the startup recovery both run on a complete bot.
 */
+async function startBot() {
+  try {
+    await supplierAdapter.initialize();
+  } catch (error) {
+    console.error(
+      "[SUPPLIER] Not available:",
+      error.message
+    );
+    console.log(
+      "[SUPPLIER] Approvals will be held for manual review"
+    );
+  }
 
-bot.launch();
+  try {
+    await runStartupRecovery();
+  } catch (error) {
+    console.error(
+      "[STARTUP] Recovery failed:",
+      error.message
+    );
+  }
 
-console.log(
-  `🚀 ${STORE_NAME} bot is running...`
-);
+  await bot.launch();
+
+  console.log(
+    `🚀 ${STORE_NAME} bot is running...`
+  );
+}
+
+// Tests require this file to reach the handlers, so only start when this
+// file is the entry point.
+if (require.main === module) {
+  startBot();
+}
+
+module.exports = {
+  bot,
+  supplierAdapter,
+  processAutoTopup,
+  recoverTopupStatus,
+  runStartupRecovery,
+  settleForReview,
+  notifyAdminOfReview,
+  reviewingOrders,
+  getOrders,
+  readOrders,
+  mutateOrder,
+  appendOrder,
+};
 
 /*
 |--------------------------------------------------------------------------
@@ -3949,7 +5246,7 @@ bot.action(/^sage_(.+)$/, async (ctx) => {
     }
   );
 
-  ctx.session.adminFlow = { step: "game_idlabel", gameId: game.id };
+  ensureSession(ctx).adminFlow = { step: "game_idlabel", gameId: game.id };
 });
 
 bot.action(/^sagee_(.+)$/, async (ctx) => {
@@ -3965,7 +5262,7 @@ bot.action(/^sagee_(.+)$/, async (ctx) => {
     return ctx.reply("❌ Game not found.");
   }
 
-  ctx.session.adminFlow = { step: "game_emoji_existing", gameId: game.id };
+  ensureSession(ctx).adminFlow = { step: "game_emoji_existing", gameId: game.id };
 
   await ctx.reply(
     `🏷 *CHANGE EMOJI*\n\n` +
@@ -3992,7 +5289,7 @@ bot.action(/^sagp_(.+)$/, async (ctx) => {
     return ctx.reply("❌ Game not found.");
   }
 
-  ctx.session.adminFlow = {
+  ensureSession(ctx).adminFlow = {
     step: "package_name",
     gameId: game.id,
   };
@@ -4023,7 +5320,7 @@ bot.action(/^sape_price_(.+)~(.+)$/, async (ctx) => {
     return ctx.reply("❌ Package not found.");
   }
 
-  ctx.session.adminFlow = {
+  ensureSession(ctx).adminFlow = {
     step: "package_price_update",
     gameId: found.game.id,
     packageId: found.pkg.id,
@@ -4056,7 +5353,7 @@ bot.action(/^sape_name_(.+)~(.+)$/, async (ctx) => {
     return ctx.reply("❌ Package not found.");
   }
 
-  ctx.session.adminFlow = {
+  ensureSession(ctx).adminFlow = {
     step: "package_rename",
     gameId: found.game.id,
     packageId: found.pkg.id,

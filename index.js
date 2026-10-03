@@ -417,6 +417,21 @@ function esc(value) {
   );
 }
 
+/*
+|--------------------------------------------------------------------------
+| INLINE CODE
+|--------------------------------------------------------------------------
+| A code span is literal: Telegram does not process backslash escapes inside
+| backticks, so escaping there leaks the backslashes into the message. An
+| order ID such as HG-1234-ABCD would reach the customer as HG\-1234\-ABCD.
+| Values placed in backticks go through this instead.
+*/
+function code(value) {
+  return `\`${String(value ?? "")
+    .replace(/\\/g, "")
+    .replace(/`/g, "'")}\``;
+}
+
 const STATUS_META = {
   pending_payment: { label: "🕒 Awaiting Payment" },
   pending_approval: { label: "🔍 Verifying Proof" },
@@ -1447,7 +1462,7 @@ bot.on("text", async (ctx, next) => {
       return ctx.reply(
         `✅ *${esc(payment.title)}* saved!\n\n` +
           `━━━━━━━━━━━━━━━━━━\n\n` +
-          `${payment.lines.map((l) => `\`${esc(l)}\``).join("\n")}`,
+          payment.lines.map((l) => code(l)).join("\n"),
         {
           parse_mode: "Markdown",
           ...paymentAdminMenu(payment),
@@ -1461,7 +1476,7 @@ bot.on("text", async (ctx, next) => {
     ];
 
     return ctx.reply(
-      `✅ Added: \`${esc(text)}\`\n\n` +
+      `✅ Added: ${code(text)}\n\n` +
         `━━━━━━━━━━━━━━━━━━\n\n` +
         `${ensureSession(ctx).adminFlow.buffer
           .map((l, i) => `${i + 1}. ${esc(l)}`)
@@ -2028,10 +2043,10 @@ bot.action("confirm_order", async (ctx) => {
     "Creating your order",
     `💳 *PAYMENT REQUIRED*\n\n` +
       `━━━━━━━━━━━━━━━━━━\n\n` +
-      `🧾 *ORDER ID*\n\`${esc(order.id)}\`\n\n` +
+      `🧾 *ORDER ID*\n${code(order.id)}\n\n` +
       `🎮 *GAME*\n${game.name}\n\n` +
       `📦 *PACKAGE*\n${esc(order.productName)}\n\n` +
-      `🆔 *${esc(game.idLabel.toUpperCase())}*\n\`${esc(order.playerId)}\`\n\n` +
+      `🆔 *${esc(game.idLabel.toUpperCase())}*\n${code(order.playerId)}\n\n` +
       `💰 *TOTAL*\nLKR ${catalog.formatPrice(pkg.price)}\n\n` +
       `━━━━━━━━━━━━━━━━━━\n\n` +
       `${paymentInstructions()}\n\n` +
@@ -2118,7 +2133,7 @@ bot.on("text", async (ctx) => {
   // told to send a screenshot they no longer intend to send.
   if (ctx.session?.waitingForPayment && target !== "cancel") {
     const orderRef = ctx.session.orderId
-      ? `Order \`${esc(ctx.session.orderId)}\` is waiting\nfor your payment proof.\n\n`
+      ? `Order ${code(ctx.session.orderId)} is waiting\nfor your payment proof.\n\n`
       : `Your order is waiting for your\npayment proof.\n\n`;
 
     return ctx.reply(
@@ -2178,9 +2193,12 @@ Nothing is saved. Tap below to start again.`,
 
   if (isCommand) {
     return ctx.reply(
-      `🤔 I do not know the command \`/${esc(word)}\`.\n\n` +
-        `These are the ones I understand:\n\n` +
-        `${KNOWN_COMMANDS}`,
+      `🤔 *THAT IS NOT A COMMAND I KNOW*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `\`/${esc(word)}\` is not something I understand.\n\n` +
+        `These are the commands I can run:\n\n` +
+        `${KNOWN_COMMANDS}\n\n` +
+        `Or tap a button below to get going.`,
       {
         parse_mode: "Markdown",
         ...replyMenu(),
@@ -2189,15 +2207,86 @@ Nothing is saved. Tap below to start again.`,
   }
 
   await ctx.reply(
-    `👋 I did not quite catch that.\n\n` +
-      `Tap a button below, or type *help* to see what\n` +
-      `I can do.`,
+    `👋 *I DID NOT UNDERSTAND THAT*\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `I am a top-up bot, so I can only help with\n` +
+      `these things:\n\n` +
+      `🎮 Free Fire and Blood Strike top-ups\n` +
+      `🆔 Checking a player ID\n` +
+      `🧾 Order status and payment\n\n` +
+      `Type *help* any time, or tap a button below.`,
     {
       parse_mode: "Markdown",
       ...replyMenu(),
     }
   );
 });
+
+/*
+|--------------------------------------------------------------------------
+| OTHER MESSAGE TYPES
+|--------------------------------------------------------------------------
+| Stickers, voice notes, videos and files are not commands and not payment
+| proofs, so without this the bot again says nothing at all.
+*/
+
+const MEDIA_GUIDE =
+  `👋 *I ONLY READ TEXT AND SCREENSHOTS*\n\n` +
+  `━━━━━━━━━━━━━━━━━━\n\n` +
+  `You sent something I cannot use.\n\n` +
+  `Here is what I understand:\n\n` +
+  `💬 *Text* like \`hi\`, \`help\` or \`orders\`\n` +
+  `📸 *A photo* of your payment receipt\n` +
+  `🆔 *Numbers* for your game player ID\n\n` +
+  `Tap a button below to continue.`;
+
+for (const mediaType of [
+  "sticker",
+  "voice",
+  "video",
+  "video_note",
+  "animation",
+  "document",
+  "contact",
+  "location",
+  "venue",
+  "dice",
+  "poll",
+]) {
+  bot.on(mediaType, async (ctx) => {
+    // An admin typing into a flow must not be answered by the store.
+    if (ctx.from.id === ADMIN_ID && ctx.session?.adminFlow) {
+      return;
+    }
+
+    // A payment was expected, so point at the actual next step instead of
+    // describing the whole bot.
+    if (ctx.session?.waitingForPayment) {
+      const orderRef = ctx.session.orderId
+        ? `Order ${code(ctx.session.orderId)} is still\nwaiting for payment.\n\n`
+        : `Your order is still waiting for payment.\n\n`;
+
+      return ctx.reply(
+        `📸 *PAYMENT SCREENSHOT NEEDED*\n\n` +
+          `━━━━━━━━━━━━━━━━━━\n\n` +
+          orderRef +
+          `Send the receipt as a *photo*, not a file,\nsticker or voice note.\n\n` +
+          `_Type cancel to drop this order._`,
+        {
+          parse_mode: "Markdown",
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback("❌  CANCEL ORDER", "cancel_order")],
+          ]),
+        }
+      );
+    }
+
+    await ctx.reply(MEDIA_GUIDE, {
+      parse_mode: "Markdown",
+      ...replyMenu(),
+    });
+  });
+}
 
 bot.action("payment_done", async (ctx) => {
   await ctx.answerCbQuery(
@@ -2310,7 +2399,7 @@ Status: ${statusBadge(order.status)}`
     final:
       `📸 *PAYMENT PROOF SUBMITTED*\n\n` +
       `━━━━━━━━━━━━━━━━━━\n\n` +
-      `🧾 *ORDER ID*\n\`${esc(order.id)}\`\n\n` +
+      `🧾 *ORDER ID*\n${code(order.id)}\n\n` +
       `🎮 *GAME*\n${esc(order.gameName || "Blood Strike")}\n\n` +
       `📦 *PACKAGE*\n${esc(order.productName)}\n\n` +
       `💰 *AMOUNT*\nLKR ${order.price.toLocaleString()}\n\n` +
@@ -2787,7 +2876,12 @@ async function runStartupRecovery() {
     (order) =>
       order.topupStatus === "topup_processing" ||
       order.topupStatus === "ready_for_topup" ||
-      order.status === "needs_review"
+      order.status === "needs_review" ||
+      // Paid and approved but never handed to the supplier. Approval always
+      // sets ready_for_topup, so this shape only appears if a write was
+      // interrupted or the record predates the top-up feature. Left alone it
+      // would stay invisible while the customer waits.
+      (order.status === "approved" && !order.topupStatus)
   );
 
   if (pending.length === 0) {
@@ -2815,6 +2909,12 @@ async function runStartupRecovery() {
     await mutateOrder(order.id, (current) => {
       if (isTerminalTopup(current)) {
         return current;
+      }
+
+      // Keep whatever the status was so parking a record never erases
+      // the fact that it had already been paid and approved.
+      if (!current.previousStatus) {
+        current.previousStatus = current.status;
       }
 
       current.topupStatus = "needs_review";
@@ -3141,7 +3241,7 @@ async function sendMyOrders(ctx, isEdit) {
       message +=
         `🧾 *${esc(order.id)}*\n` +
         `📦 ${esc(order.productName)}\n` +
-        `🆔 Player ID: \`${esc(order.playerId)}\`\n` +
+        `🆔 Player ID: ${code(order.playerId)}\n` +
         `💰 LKR ${Number(order.price).toLocaleString()}\n` +
         `${statusBadge(order.status)}\n\n`;
     });
@@ -3221,7 +3321,7 @@ function reviewQueueText() {
       `🧾 ${esc(order.id)}\n` +
       `🎮 ${esc(order.gameName)}\n` +
       `📦 ${esc(order.productName)}\n` +
-      `🆔 \`${esc(order.playerId)}\`\n` +
+      `🆔 ${code(order.playerId)}\n` +
       `💬 ${esc(order.topupError || "no supplier reply")}\n\n`;
   }
 
@@ -3258,10 +3358,10 @@ function reviewOrderScreen(order) {
   return (
     `🕵️ *REVIEW ORDER*\n` +
     `━━━━━━━━━━━━━━━━━━\n\n` +
-    `🧾 Order:\n\`${esc(order.id)}\`\n\n` +
+    `🧾 Order:\n${code(order.id)}\n\n` +
     `🎮 ${esc(order.gameName)}\n\n` +
     `📦 Product:\n${esc(order.productName)}\n\n` +
-    `🆔 Player ID:\n\`${esc(order.playerId)}\`\n\n` +
+    `🆔 Player ID:\n${code(order.playerId)}\n\n` +
     `💰 Amount:\nLKR ${esc(order.price)}\n\n` +
     `👤 Customer:\n${esc(order.firstName)} (@${esc(order.username || "unknown")})\n\n` +
     `━━━━━━━━━━━━━━━━━━\n\n` +
@@ -3269,12 +3369,12 @@ function reviewOrderScreen(order) {
     `📤 Attempts: ${attempts} of ${TOPUP_MAX_ATTEMPTS}\n` +
     `📦 Automated: ${automated ? "yes" : "no (no confirmed supplier name)"}\n` +
     (order.supplierTransactionId
-      ? `🔖 Transaction:\n\`${esc(order.supplierTransactionId)}\`\n`
+      ? `🔖 Transaction:\n${code(order.supplierTransactionId)}\n`
       : "") +
     (order.supplierRawReply
-      ? `💬 Supplier replied:\n\`${esc(
+      ? `💬 Supplier replied:\n${code(
           order.supplierRawReply.slice(0, 120)
-        )}\`\n`
+        )}\n`
       : "") +
     `⚠️ Reason:\n${esc(order.topupError || "not recorded")}\n\n` +
     `━━━━━━━━━━━━━━━━━━\n\n` +
@@ -3395,7 +3495,7 @@ bot.action(/^review_proof_(.+)$/, async (ctx) => {
     caption:
       `🧾 ${esc(order.id)}\n` +
       `📦 ${esc(order.productName)}\n` +
-      `🆔 \`${esc(order.playerId)}\`\n` +
+      `🆔 ${code(order.playerId)}\n` +
       `💰 LKR ${esc(order.price)}`,
   });
 });
@@ -3438,7 +3538,7 @@ bot.action(/^review_done_(.+)$/, async (ctx) => {
   await ctx.editMessageText(
     `✅ *MARKED DELIVERED*\n\n` +
       `━━━━━━━━━━━━━━━━━━\n\n` +
-      `🧾 \`${esc(applied.id)}\`\n\n` +
+      `🧾 ${code(applied.id)}\n\n` +
       `The customer has been told their top-up\n` +
       `is complete.`,
     {
@@ -3488,7 +3588,7 @@ bot.action(/^review_fail_(.+)$/, async (ctx) => {
   await ctx.editMessageText(
     `❌ *MARKED FAILED*\n\n` +
       `━━━━━━━━━━━━━━━━━━\n\n` +
-      `🧾 \`${esc(applied.id)}\`\n\n` +
+      `🧾 ${code(applied.id)}\n\n` +
       `The customer has been asked to contact support\n` +
       `for a refund.`,
     {
@@ -3562,7 +3662,7 @@ Attempts: ${order.topupAttempts || 0} of ${TOPUP_MAX_ATTEMPTS}`
   await ctx.editMessageText(
     `🔄 *RETRYING*\n\n` +
       `━━━━━━━━━━━━━━━━━━\n\n` +
-      `🧾 \`${esc(orderId)}\`\n\n` +
+      `🧾 ${code(orderId)}\n\n` +
       `Attempt ${(prepared.topupAttempts || 0) + 1} of ` +
       `${TOPUP_MAX_ATTEMPTS} is starting.`,
     {
@@ -3898,7 +3998,7 @@ bot.action("store_payments", async (ctx) => {
 */
 function paymentAdminText(payment) {
   const lines = payment.lines.length
-    ? payment.lines.map((l) => `\`${esc(l)}\``).join("\n")
+    ? payment.lines.map((l) => code(l)).join("\n")
     : "_No details set_";
 
   return (
@@ -4595,7 +4695,7 @@ for approval.`,
     message +=
       `🧾 ${esc(order.id)}\n` +
       `📦 ${esc(order.productName)}\n` +
-      `🆔 \`${esc(order.playerId)}\`\n` +
+      `🆔 ${code(order.playerId)}\n` +
       `💰 LKR ${order.price.toLocaleString()}\n\n`;
   }
 
@@ -5020,7 +5120,7 @@ function userDetailText(user, orders) {
           .map(
             (o) =>
               `${statusBadge(o.status)}\n` +
-              `\`${esc(o.id)}\` · ${esc(o.productName)}\n` +
+              `${code(o.id)} · ${esc(o.productName)}\n` +
               `LKR ${analytics.money(o.price)} · ${analytics.when(o.createdAt)}`
           )
           .join("\n\n")
@@ -5298,7 +5398,10 @@ bot.catch((error) => {
 
   console.error("❌ BOT ERROR:", error);
 });
-bot.telegram.setMyCommands([
+// Customers only see what they can actually use. The admin commands are
+// registered separately against the admin's chat so they do not clutter
+// the command list for everyone else.
+const CUSTOMER_COMMANDS = [
   {
     command: "start",
     description: "🏠 Open the store",
@@ -5316,14 +5419,42 @@ bot.telegram.setMyCommands([
     description: "ℹ️ Developer & contact",
   },
   {
-    command: "review",
-    description: "🕵️ Review unresolved top-ups",
+    command: "support",
+    description: "💬 Contact customer support",
   },
+  {
+    command: "cancel",
+    description: "❌ Cancel the current order",
+  },
+];
+
+const ADMIN_COMMANDS = [
   {
     command: "admin",
     description: "👑 Admin panel",
   },
-]);
+  {
+    command: "review",
+    description: "🕵️ Review unresolved top-ups",
+  },
+];
+
+// These are fire-and-forget: a BotFather outage or a bad token would
+// otherwise surface as an unhandled rejection and take the bot down. The
+// commands are a convenience, so a failure only degrades the menu.
+function publishCommands(commands, scope) {
+  bot.telegram
+    .setMyCommands(commands, scope)
+    .catch((error) =>
+      console.warn(
+        "⚠️  Could not publish the command list:",
+        error.message
+      )
+    );
+}
+
+publishCommands(CUSTOMER_COMMANDS);
+publishCommands(ADMIN_COMMANDS, { scope: { type: "chat", chat_id: ADMIN_ID } });
 
 /*
 |--------------------------------------------------------------------------

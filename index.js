@@ -5439,22 +5439,32 @@ const ADMIN_COMMANDS = [
   },
 ];
 
+/*
+| A chat-scoped list REPLACES the default list for that chat rather than
+| adding to it, so scoping the admin commands alone left the admin chat
+| showing only /admin and /review. Everything goes in one default list
+| instead. The handlers already check the admin ID, so a customer typing
+| /admin just gets "Admin access only".
+*/
+const ALL_COMMANDS = [...CUSTOMER_COMMANDS, ...ADMIN_COMMANDS];
+
 // These are fire-and-forget: a BotFather outage or a bad token would
 // otherwise surface as an unhandled rejection and take the bot down. The
 // commands are a convenience, so a failure only degrades the menu.
-function publishCommands(commands, scope) {
-  bot.telegram
-    .setMyCommands(commands, scope)
-    .catch((error) =>
-      console.warn(
-        "⚠️  Could not publish the command list:",
-        error.message
-      )
-    );
-}
+bot.telegram
+  .setMyCommands(ALL_COMMANDS)
+  .catch((error) =>
+    console.warn(
+      "⚠️  Could not publish the command list:",
+      error.message
+    )
+  );
 
-publishCommands(CUSTOMER_COMMANDS);
-publishCommands(ADMIN_COMMANDS, { scope: { type: "chat", chat_id: ADMIN_ID } });
+// The stale chat-scoped list from an earlier build would otherwise keep
+// overriding the default list in the admin chat, so clear it.
+bot.telegram
+  .deleteMyCommands({ scope: { type: "chat", chat_id: ADMIN_ID } })
+  .catch(() => {});
 
 /*
 |--------------------------------------------------------------------------

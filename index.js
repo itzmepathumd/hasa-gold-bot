@@ -2074,156 +2074,6 @@ bot.action("confirm_order", async (ctx) => {
 
 /*
 |--------------------------------------------------------------------------
-| FALLBACK
-|--------------------------------------------------------------------------
-| Everything that reaches here was not claimed by an earlier handler. Without
-| a fallback the bot stays silent, which reads as broken rather than as "I
-| did not understand". Plain words map to the matching screen so a customer
-| typing "hi" or "help" in the chat gets the same result as tapping a button.
-*/
-
-const TEXT_SHORTCUTS = {
-  home: "home",
-  menu: "home",
-  start: "home",
-  hi: "home",
-  hello: "home",
-  hey: "home",
-  support: "support",
-  help: "support",
-  contact: "support",
-  orders: "orders",
-  myorders: "orders",
-  myorder: "orders",
-  cancel: "cancel",
-  stop: "cancel",
-  about: "about",
-  games: "games",
-};
-
-const KNOWN_COMMANDS =
-  `/start · /games · /orders · /about · /support · /cancel`;
-
-bot.on("text", async (ctx) => {
-  // An admin mid-flow is typing into an admin flow, not chatting with the
-  // store, so this must never answer them.
-  if (ctx.from.id === ADMIN_ID && ctx.session?.adminFlow) {
-    return;
-  }
-
-  // A mid-purchase session owns the next message, so only nudge instead of
-  // drawing a menu that would hide what they are being asked for.
-  if (ctx.session?.waitingForPlayerId) {
-    return;
-  }
-
-  const raw = ctx.message.text.trim();
-
-  // "/help@SomeBot" arrives with the bot username attached in groups.
-  const isCommand = raw.startsWith("/");
-
-  const word = (
-    isCommand ? raw.slice(1).split("@")[0].split(" ")[0] : raw
-  ).toLowerCase();
-
-  const target = TEXT_SHORTCUTS[word];
-
-  // A pending order still has to be paid, so nudge instead of drawing a menu.
-  // An explicit "cancel" is honoured, otherwise the customer is stuck being
-  // told to send a screenshot they no longer intend to send.
-  if (ctx.session?.waitingForPayment && target !== "cancel") {
-    const orderRef = ctx.session.orderId
-      ? `Order ${code(ctx.session.orderId)} is waiting\nfor your payment proof.\n\n`
-      : `Your order is waiting for your\npayment proof.\n\n`;
-
-    return ctx.reply(
-      `📸 *PAYMENT SCREENSHOT NEEDED*\n\n` +
-        `━━━━━━━━━━━━━━━━━━\n\n` +
-        orderRef +
-        `Send the screenshot as a photo here.\n` +
-        `Any text will not be treated as payment.\n\n` +
-        `_Type cancel to drop this order._`,
-      {
-        parse_mode: "Markdown",
-        ...Markup.inlineKeyboard([
-          [Markup.button.callback("❌  CANCEL ORDER", "cancel_order")],
-        ]),
-      }
-    );
-  }
-
-  if (target === "home") {
-    ctx.session = {};
-
-    return ctx.reply(UI.home, {
-      parse_mode: "Markdown",
-      ...replyMenu(),
-    });
-  }
-
-  if (target === "support") {
-    return ctx.reply(UI.support, {
-      parse_mode: "Markdown",
-      ...supportMenu(),
-    });
-  }
-
-  if (target === "orders") {
-    return sendMyOrders(ctx, false);
-  }
-
-  if (target === "games") {
-    return showGames(ctx, false);
-  }
-
-  if (target === "about") {
-    return showAbout(ctx);
-  }
-
-  if (target === "cancel") {
-    ctx.session = {};
-
-    return ctx.reply(
-      `❌ Cancelled.
-
-Nothing is saved. Tap below to start again.`,
-      homeMenu()
-    );
-  }
-
-  if (isCommand) {
-    return ctx.reply(
-      `🤔 *THAT IS NOT A COMMAND I KNOW*\n\n` +
-        `━━━━━━━━━━━━━━━━━━\n\n` +
-        `\`/${esc(word)}\` is not something I understand.\n\n` +
-        `These are the commands I can run:\n\n` +
-        `${KNOWN_COMMANDS}\n\n` +
-        `Or tap a button below to get going.`,
-      {
-        parse_mode: "Markdown",
-        ...replyMenu(),
-      }
-    );
-  }
-
-  await ctx.reply(
-    `👋 *I DID NOT UNDERSTAND THAT*\n\n` +
-      `━━━━━━━━━━━━━━━━━━\n\n` +
-      `I am a top-up bot, so I can only help with\n` +
-      `these things:\n\n` +
-      `🎮 Free Fire and Blood Strike top-ups\n` +
-      `🆔 Checking a player ID\n` +
-      `🧾 Order status and payment\n\n` +
-      `Type *help* any time, or tap a button below.`,
-    {
-      parse_mode: "Markdown",
-      ...replyMenu(),
-    }
-  );
-});
-
-/*
-|--------------------------------------------------------------------------
 | OTHER MESSAGE TYPES
 |--------------------------------------------------------------------------
 | Stickers, voice notes, videos and files are not commands and not payment
@@ -5723,6 +5573,164 @@ bot.action(/^sape_name_(.+)~(.+)$/, async (ctx) => {
     {
       parse_mode: "Markdown",
       ...cancelFlowButton(),
+    }
+  );
+});
+
+/*
+|--------------------------------------------------------------------------
+| FALLBACK
+|--------------------------------------------------------------------------
+| Everything that reaches here was not claimed by an earlier handler. Without
+| a fallback the bot stays silent, which reads as broken rather than as "I
+| did not understand". Plain words map to the matching screen so a customer
+| typing "hi" or "help" in the chat gets the same result as tapping a button.
+*/
+
+const TEXT_SHORTCUTS = {
+  home: "home",
+  menu: "home",
+  start: "home",
+  hi: "home",
+  hello: "home",
+  hey: "home",
+  support: "support",
+  help: "support",
+  contact: "support",
+  orders: "orders",
+  myorders: "orders",
+  myorder: "orders",
+  cancel: "cancel",
+  stop: "cancel",
+  about: "about",
+  games: "games",
+};
+
+// The admin commands are only useful to the admin, so they are only
+// advertised to them. Every command here has a real handler.
+const CUSTOMER_COMMANDS_TEXT = `/start · /games · /orders · /about · /support · /cancel`;
+const ADMIN_COMMANDS_TEXT = `/admin · /review`;
+
+function knownCommands(ctx) {
+  return ctx.from.id === ADMIN_ID
+    ? `${CUSTOMER_COMMANDS_TEXT} · ${ADMIN_COMMANDS_TEXT}`
+    : CUSTOMER_COMMANDS_TEXT;
+}
+
+bot.on("text", async (ctx) => {
+  // An admin mid-flow is typing into an admin flow, not chatting with the
+  // store, so this must never answer them.
+  if (ctx.from.id === ADMIN_ID && ctx.session?.adminFlow) {
+    return;
+  }
+
+  // A mid-purchase session owns the next message, so only nudge instead of
+  // drawing a menu that would hide what they are being asked for.
+  if (ctx.session?.waitingForPlayerId) {
+    return;
+  }
+
+  const raw = ctx.message.text.trim();
+
+  // "/help@SomeBot" arrives with the bot username attached in groups.
+  const isCommand = raw.startsWith("/");
+
+  const word = (
+    isCommand ? raw.slice(1).split("@")[0].split(" ")[0] : raw
+  ).toLowerCase();
+
+  const target = TEXT_SHORTCUTS[word];
+
+  // A pending order still has to be paid, so nudge instead of drawing a menu.
+  // An explicit "cancel" is honoured, otherwise the customer is stuck being
+  // told to send a screenshot they no longer intend to send.
+  if (ctx.session?.waitingForPayment && target !== "cancel") {
+    const orderRef = ctx.session.orderId
+      ? `Order ${code(ctx.session.orderId)} is waiting\nfor your payment proof.\n\n`
+      : `Your order is waiting for your\npayment proof.\n\n`;
+
+    return ctx.reply(
+      `📸 *PAYMENT SCREENSHOT NEEDED*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        orderRef +
+        `Send the screenshot as a photo here.\n` +
+        `Any text will not be treated as payment.\n\n` +
+        `_Type cancel to drop this order._`,
+      {
+        parse_mode: "Markdown",
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback("❌  CANCEL ORDER", "cancel_order")],
+        ]),
+      }
+    );
+  }
+
+  if (target === "home") {
+    ctx.session = {};
+
+    return ctx.reply(UI.home, {
+      parse_mode: "Markdown",
+      ...replyMenu(),
+    });
+  }
+
+  if (target === "support") {
+    return ctx.reply(UI.support, {
+      parse_mode: "Markdown",
+      ...supportMenu(),
+    });
+  }
+
+  if (target === "orders") {
+    return sendMyOrders(ctx, false);
+  }
+
+  if (target === "games") {
+    return showGames(ctx, false);
+  }
+
+  if (target === "about") {
+    return showAbout(ctx);
+  }
+
+  if (target === "cancel") {
+    ctx.session = {};
+
+    return ctx.reply(
+      `❌ Cancelled.
+
+Nothing is saved. Tap below to start again.`,
+      homeMenu()
+    );
+  }
+
+  if (isCommand) {
+    return ctx.reply(
+      `🤔 *THAT IS NOT A COMMAND I KNOW*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `\`/${esc(word)}\` is not something I understand.\n\n` +
+        `These are the commands I can run:\n\n` +
+        `${knownCommands(ctx)}\n\n` +
+        `Or tap a button below to get going.`,
+      {
+        parse_mode: "Markdown",
+        ...replyMenu(),
+      }
+    );
+  }
+
+  await ctx.reply(
+    `👋 *I DID NOT UNDERSTAND THAT*\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `I am a top-up bot, so I can only help with\n` +
+      `these things:\n\n` +
+      `🎮 Free Fire and Blood Strike top-ups\n` +
+      `🆔 Checking a player ID\n` +
+      `🧾 Order status and payment\n\n` +
+      `Type *help* any time, or tap a button below.`,
+    {
+      parse_mode: "Markdown",
+      ...replyMenu(),
     }
   );
 });

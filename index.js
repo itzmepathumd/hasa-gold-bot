@@ -1560,6 +1560,39 @@ bot.hears("ℹ️  About", async (ctx) => {
 
 /*
 |--------------------------------------------------------------------------
+| PLAYER CHECK RATE LIMIT
+|--------------------------------------------------------------------------
+| Every ID lookup is a real SHOP2TOPUP request, so the store pays for each
+| one. Without a cap, a single user restarting the order flow repeatedly
+| drains the quota for everyone. The map is pruned on access so it cannot
+| grow without bound.
+*/
+
+const PLAYER_CHECK_WINDOW_MS = 60_000;
+const PLAYER_CHECK_MAX_PER_WINDOW = 5;
+
+const playerCheckHits = new Map();
+
+function allowPlayerCheck(userId) {
+  const now = Date.now();
+  const hits = (playerCheckHits.get(userId) || []).filter(
+    (t) => now - t < PLAYER_CHECK_WINDOW_MS
+  );
+
+  if (hits.length >= PLAYER_CHECK_MAX_PER_WINDOW) {
+    playerCheckHits.set(userId, hits);
+
+    return false;
+  }
+
+  hits.push(now);
+  playerCheckHits.set(userId, hits);
+
+  return true;
+}
+
+/*
+|--------------------------------------------------------------------------
 | PLAYER ID
 |--------------------------------------------------------------------------
 */
@@ -1570,8 +1603,10 @@ bot.on("text", async (ctx, next) => {
     return next();
   }
 
+  // Not waiting for an ID, so this message is not ours. Pass it on so the
+  // fallback can answer instead of the bot going silent.
   if (!ctx.session?.waitingForPlayerId) {
-    return;
+    return next();
   }
 
   const playerId = text;
@@ -1602,6 +1637,17 @@ bot.on("text", async (ctx, next) => {
         `Please send only the numbers of your\n` +
         `${game.name} ${game.idLabel}.\n\n` +
         `Example:\n\`${game.idExample}\``,
+      { parse_mode: "Markdown" }
+    );
+  }
+
+  if (!allowPlayerCheck(ctx.from.id)) {
+    return ctx.reply(
+      `⏳ *PLEASE SLOW DOWN*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `Too many player ID checks in a row.\n\n` +
+        `Wait a minute and send the ID again.\n` +
+        `Nothing has been charged or ordered.`,
       { parse_mode: "Markdown" }
     );
   }
@@ -1941,6 +1987,10 @@ bot.action("confirm_order", async (ctx) => {
 
     rejectedAt: null,
 
+    rejectedBy: null,
+
+    rejectReason: null,
+
     // Automatic top-up tracking. Filled in as the order moves.
     topupStatus: null,
     topupAttempts: 0,
@@ -2004,6 +2054,148 @@ bot.action("confirm_order", async (ctx) => {
       ]),
     },
     { spinner: "gear", frames: 3, delay: 300 }
+  );
+});
+
+/*
+|--------------------------------------------------------------------------
+| FALLBACK
+|--------------------------------------------------------------------------
+| Everything that reaches here was not claimed by an earlier handler. Without
+| a fallback the bot stays silent, which reads as broken rather than as "I
+| did not understand". Plain words map to the matching screen so a customer
+| typing "hi" or "help" in the chat gets the same result as tapping a button.
+*/
+
+const TEXT_SHORTCUTS = {
+  home: "home",
+  menu: "home",
+  start: "home",
+  hi: "home",
+  hello: "home",
+  hey: "home",
+  support: "support",
+  help: "support",
+  contact: "support",
+  orders: "orders",
+  myorders: "orders",
+  myorder: "orders",
+  cancel: "cancel",
+  stop: "cancel",
+  about: "about",
+  games: "games",
+};
+
+const KNOWN_COMMANDS =
+  `/start · /games · /orders · /about · /support · /cancel`;
+
+bot.on("text", async (ctx) => {
+  // An admin mid-flow is typing into an admin flow, not chatting with the
+  // store, so this must never answer them.
+  if (ctx.from.id === ADMIN_ID && ctx.session?.adminFlow) {
+    return;
+  }
+
+  // A mid-purchase session owns the next message, so only nudge instead of
+  // drawing a menu that would hide what they are being asked for.
+  if (ctx.session?.waitingForPlayerId) {
+    return;
+  }
+
+  const raw = ctx.message.text.trim();
+
+  // "/help@SomeBot" arrives with the bot username attached in groups.
+  const isCommand = raw.startsWith("/");
+
+  const word = (
+    isCommand ? raw.slice(1).split("@")[0].split(" ")[0] : raw
+  ).toLowerCase();
+
+  const target = TEXT_SHORTCUTS[word];
+
+  // A pending order still has to be paid, so nudge instead of drawing a menu.
+  // An explicit "cancel" is honoured, otherwise the customer is stuck being
+  // told to send a screenshot they no longer intend to send.
+  if (ctx.session?.waitingForPayment && target !== "cancel") {
+    const orderRef = ctx.session.orderId
+      ? `Order \`${esc(ctx.session.orderId)}\` is waiting\nfor your payment proof.\n\n`
+      : `Your order is waiting for your\npayment proof.\n\n`;
+
+    return ctx.reply(
+      `📸 *PAYMENT SCREENSHOT NEEDED*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        orderRef +
+        `Send the screenshot as a photo here.\n` +
+        `Any text will not be treated as payment.\n\n` +
+        `_Type cancel to drop this order._`,
+      {
+        parse_mode: "Markdown",
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback("❌  CANCEL ORDER", "cancel_order")],
+        ]),
+      }
+    );
+  }
+
+  if (target === "home") {
+    ctx.session = {};
+
+    return ctx.reply(UI.home, {
+      parse_mode: "Markdown",
+      ...replyMenu(),
+    });
+  }
+
+  if (target === "support") {
+    return ctx.reply(UI.support, {
+      parse_mode: "Markdown",
+      ...supportMenu(),
+    });
+  }
+
+  if (target === "orders") {
+    return sendMyOrders(ctx, false);
+  }
+
+  if (target === "games") {
+    return showGames(ctx, false);
+  }
+
+  if (target === "about") {
+    return showAbout(ctx);
+  }
+
+  if (target === "cancel") {
+    ctx.session = {};
+
+    return ctx.reply(
+      `❌ Cancelled.
+
+Nothing is saved. Tap below to start again.`,
+      homeMenu()
+    );
+  }
+
+  if (isCommand) {
+    return ctx.reply(
+      `🤔 I do not know the command \`/${esc(word)}\`.\n\n` +
+        `These are the ones I understand:\n\n` +
+        `${KNOWN_COMMANDS}`,
+      {
+        parse_mode: "Markdown",
+        ...replyMenu(),
+      }
+    );
+  }
+
+  await ctx.reply(
+    `👋 I did not quite catch that.\n\n` +
+      `Tap a button below, or type *help* to see what\n` +
+      `I can do.`,
+    {
+      parse_mode: "Markdown",
+      ...replyMenu(),
+    }
   );
 });
 
@@ -2853,6 +3045,7 @@ Status: ${statusBadge(order.status)}`
   }
 
   const rejectedAt = new Date().toISOString();
+  const rejectReason = "Rejected by admin";
 
   const rejected = await mutateOrder(order.id, (current) => {
     if (current.status !== "pending_approval") {
@@ -2861,6 +3054,10 @@ Status: ${statusBadge(order.status)}`
 
     current.status = "rejected";
     current.rejectedAt = rejectedAt;
+    // A rejection with no recorded reason cannot be defended later if the
+    // customer disputes it, so the actor and reason are always stored.
+    current.rejectedBy = ctx.from.id;
+    current.rejectReason = rejectReason;
 
     return current;
   });
@@ -3342,8 +3539,6 @@ Attempts: ${order.topupAttempts || 0} of ${TOPUP_MAX_ATTEMPTS}`
         `Complete or fail it by hand.`
     );
   }
-
-  await ctx.answerCbQuery().catch(() => {});
 
   // Clear the parked state so processAutoTopup will claim the order again.
   const prepared = await mutateOrder(orderId, (current) => {
@@ -5191,17 +5386,33 @@ module.exports = {
 |--------------------------------------------------------------------------
 | GRACEFUL SHUTDOWN
 |--------------------------------------------------------------------------
+| The supplier client owns a separate MTProto socket. It has to be dropped
+| explicitly, otherwise the process stays alive after the bot stops.
 */
 
-process.once(
-  "SIGINT",
-  () => bot.stop("SIGINT")
-);
+let isShuttingDown = false;
 
-process.once(
-  "SIGTERM",
-  () => bot.stop("SIGTERM")
-);
+async function shutdown(signal) {
+  if (isShuttingDown) {
+    return;
+  }
+
+  isShuttingDown = true;
+
+  try {
+    await bot.stop(signal);
+  } catch (error) {
+    console.error("[SHUTDOWN] bot.stop failed:", error.message);
+  }
+
+  await supplierAdapter.shutdown();
+
+  // Orders left in topup_processing are recovered on the next startup.
+  process.exit(0);
+}
+
+process.once("SIGINT", () => shutdown("SIGINT"));
+process.once("SIGTERM", () => shutdown("SIGTERM"));
 
 /*
 |--------------------------------------------------------------------------

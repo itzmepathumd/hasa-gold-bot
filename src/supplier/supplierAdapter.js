@@ -323,6 +323,27 @@ class SupplierAdapter {
       supplierBot: this.client.getSupplierBotUsername(),
     };
   }
+
+  /*
+  |--------------------------------------------------------------------------
+  | SHUTDOWN
+  |--------------------------------------------------------------------------
+  | The MTProto client keeps its own socket open, so stopping the Telegraf
+  | bot alone leaves the process alive and the session half-open. Drop the
+  | connection explicitly so a restart resumes cleanly.
+  */
+  async shutdown() {
+    this.isInitialized = false;
+
+    try {
+      await this.client.disconnect();
+    } catch (error) {
+      console.error(
+        "[SUPPLIER] Disconnect on shutdown failed:",
+        error.message
+      );
+    }
+  }
 }
 
 module.exports = { SupplierAdapter };

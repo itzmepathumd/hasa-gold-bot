@@ -153,214 +153,35 @@ function paymentInstructions() {
 
 /*
 |--------------------------------------------------------------------------
-| LOCAL DATABASE
+| ORDER DATABASE
 |--------------------------------------------------------------------------
+| Orders are read and written only through the database layer, which uses
+| Firestore when it is configured and the JSON files otherwise. Nothing here
+| touches a file directly any more.
 */
 
-const ORDERS_FILE = "./orders.json";
-const ORDERS_TMP = "./orders.json.tmp";
-const ORDERS_PREV = "./orders.prev.json";
-
-if (!fs.existsSync(ORDERS_FILE)) {
-  fs.writeFileSync(ORDERS_FILE, "[]");
-}
+const {
+  readOrders,
+  getOrders,
+  mutateOrder,
+  appendOrder,
+  getOrder,
+  getUserOrders,
+  getOrdersByStatus,
+  getPendingOrders,
+  getOrderStats,
+  // Lifecycle. Aliased so they read clearly next to the other store calls
+  // and cannot be confused with a similarly named helper elsewhere.
+  hydrate: hydrateOrders,
+  describe: describeOrderStore,
+  setOrderStoreFailureHandler,
+  healthCheck: checkOrderStoreHealth,
+  closeDb: closeOrderStore,
+} = require("./src/database/orders");
 
 /*
-| Every write goes through this chain, so two approvals arriving at once
-| cannot interleave a read-modify-write and lose an order.
+| Tell the admin the order store is unusable, once per distinct reason.
 */
-let ordersWriteChain = Promise.resolve();
-
-/**
- * Read the order list.
- *
- * A corrupt file returns ok:false rather than an empty list. Returning []
- * on a parse error would make the bot believe it has no orders, and the
- * next write would then overwrite every real order with nothing.
- */
-function readOrders() {
-  let raw;
-
-  try {
-    raw = fs.readFileSync(ORDERS_FILE, "utf8");
-  } catch (error) {
-    return { ok: false, orders: [], error: error.message };
-  }
-
-  // A crash can leave a zero-length file behind.
-  if (!raw.trim()) {
-    return { ok: false, orders: [], error: "orders.json is empty" };
-  }
-
-  try {
-    const parsed = JSON.parse(raw);
-
-    if (!Array.isArray(parsed)) {
-      return {
-        ok: false,
-        orders: [],
-        error: "orders.json is not a list",
-      };
-    }
-
-    return { ok: true, orders: parsed, error: null };
-  } catch (error) {
-    return {
-      ok: false,
-      orders: [],
-      error: "orders.json is corrupt: " + error.message,
-    };
-  }
-}
-
-/**
- * Orders for read-only screens. Returns [] when the file is unreadable so
- * a listing shows empty instead of crashing, but writes must not use this.
- */
-function getOrders() {
-  const result = readOrders();
-
-  if (!result.ok) {
-    console.error(
-      `[ORDERS] Refusing to read: ${result.error}`
-    );
-  }
-
-  return result.ok ? result.orders : [];
-}
-
-/**
- * Write the order list atomically and keep one rollback copy.
- */
-function writeOrders(orders) {
-  const payload = JSON.stringify(orders, null, 2);
-
-  fs.writeFileSync(ORDERS_TMP, payload);
-
-  // Keep the previous good file so a bad write can be undone by hand.
-  try {
-    if (fs.existsSync(ORDERS_FILE)) {
-      fs.copyFileSync(ORDERS_FILE, ORDERS_PREV);
-    }
-  } catch (error) {
-    console.error(
-      "[ORDERS] Could not save the rollback copy:",
-      error.message
-    );
-  }
-
-  // rename is atomic on the same filesystem, so a reader never sees a
-  // half-written file.
-  fs.renameSync(ORDERS_TMP, ORDERS_FILE);
-}
-
-/**
- * Run a read-modify-write in order, without racing other writers.
- */
-function withOrdersLock(task) {
-  const run = ordersWriteChain.then(task, task);
-
-  ordersWriteChain = run.then(
-    () => {},
-    () => {}
-  );
-
-  return run;
-}
-
-/**
- * Change one order by id.
- *
- * The mutator receives the stored order and returns the record to persist.
- * It reports its decision through `decision`, so the object stored is never
- * a wrapper around the order.
- */
-async function mutateOrder(orderId, mutator, decision = {}) {
-  return withOrdersLock(async () => {
-    const result = readOrders();
-
-    if (!result.ok) {
-      decision.ok = false;
-      console.error(
-        `[ORDERS] Write blocked: ${result.error}`
-      );
-      await notifyAdminOfStorageFailure(result.error);
-      return null;
-    }
-
-    const index = result.orders.findIndex(
-      (o) => o.id === orderId
-    );
-
-    if (index === -1) {
-      decision.ok = true;
-      decision.found = false;
-      return null;
-    }
-
-    const updated = mutator(result.orders[index], decision);
-
-    if (updated === false) {
-      // The mutator declined, so nothing is written.
-      decision.ok = true;
-      decision.found = true;
-      return result.orders[index];
-    }
-
-    result.orders[index] = updated;
-
-    try {
-      writeOrders(result.orders);
-    } catch (error) {
-      decision.ok = false;
-      console.error(
-        `[ORDERS] Write failed: ${error.message}`
-      );
-      await notifyAdminOfStorageFailure(error.message);
-      return null;
-    }
-
-    decision.ok = true;
-    decision.found = true;
-
-    return result.orders[index];
-  });
-}
-
-/**
- * Add a new order.
- */
-async function appendOrder(order) {
-  return withOrdersLock(async () => {
-    const result = readOrders();
-
-    if (!result.ok) {
-      console.error(
-        `[ORDERS] Append blocked: ${result.error}`
-      );
-      await notifyAdminOfStorageFailure(result.error);
-      return null;
-    }
-
-    result.orders.push(order);
-
-    try {
-      writeOrders(result.orders);
-    } catch (error) {
-      console.error(
-        `[ORDERS] Append failed: ${error.message}`
-      );
-      await notifyAdminOfStorageFailure(error.message);
-      return null;
-    }
-
-    return order;
-  });
-}
-
-/**
- * Tell the admin the order store is unusable, once per distinct reason.
- */
 const storageAlerts = new Set();
 
 async function notifyAdminOfStorageFailure(reason) {
@@ -378,8 +199,8 @@ async function notifyAdminOfStorageFailure(reason) {
       `🚨 *ORDER STORE UNUSABLE*\n\n` +
         `━━━━━━━━━━━━━━━━━━\n\n` +
         `${esc(reason)}\n\n` +
-        `No orders were written. Check \`orders.json\`,\n` +
-        `and restore from \`orders.prev.json\` if needed.`,
+        `No orders were written. The store is\n` +
+        `checked at every start, so nothing was lost.`,
       { parse_mode: "Markdown" }
     );
   } catch (error) {
@@ -389,6 +210,8 @@ async function notifyAdminOfStorageFailure(reason) {
     );
   }
 }
+
+setOrderStoreFailureHandler(notifyAdminOfStorageFailure);
 
 /*
 |--------------------------------------------------------------------------
@@ -5324,6 +5147,12 @@ bot.telegram
 | client and the startup recovery both run on a complete bot.
 */
 async function startBot() {
+  // The order store decides itself, and loading it has to finish before
+  // recovery runs so recovery reads the same data the screens will.
+  const store = await hydrateOrders();
+
+  console.log(`[DB] Order store: ${store.mode} (${store.orders} order(s))`);
+
   try {
     await supplierAdapter.initialize();
   } catch (error) {
@@ -5371,6 +5200,12 @@ module.exports = {
   readOrders,
   mutateOrder,
   appendOrder,
+  getOrder,
+  getUserOrders,
+  getOrdersByStatus,
+  getPendingOrders,
+  getOrderStats,
+  describeOrderStore,
 };
 
 /*
@@ -5397,6 +5232,8 @@ async function shutdown(signal) {
   }
 
   await supplierAdapter.shutdown();
+
+  await closeOrderStore();
 
   // Orders left in topup_processing are recovered on the next startup.
   process.exit(0);

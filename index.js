@@ -1635,7 +1635,11 @@ bot.on("text", async (ctx, next) => {
             `━━━━━━━━━━━━━━━━━━\n\n` +
             `🆔 ${esc(game.idLabel.toUpperCase())}\n\`${playerId}\`\n\n` +
             `👤 Player Name\n${esc(r.playerName)}\n\n` +
-            `🌍 Region\n${esc(r.region || "Global")}\n\n` +
+            // SHOP2TOPUP returns no region for Blood Strike, so the row is
+            // hidden rather than claiming "Global".
+            (r.region
+              ? `🌍 Region\n${esc(r.region)}\n\n`
+              : "") +
             `━━━━━━━━━━━━━━━━━━\n\n` +
             `Please confirm this is your account.`
           );

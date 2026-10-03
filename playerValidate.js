@@ -3,9 +3,12 @@
 | SHOP2TOPUP PLAYER VALIDATION
 |--------------------------------------------------------------------------
 | Implements validation against SHOP2TOPUP API:
-| - GET /catalog/subcategories (to find Blood Strike subcategories)
-| - GET /catalog/category/:categoryId/requirements (for dynamic fields)
+| - GET /api/endpoints/v1/catalog/subcategories (catalog lookup)
+| - GET /api/endpoints/v1/catalog/category/:categoryId/requirements
 | - POST /api/endpoints/v1/player/validate (actual validation)
+|
+| Every path sits under /api/endpoints/v1. The bare /catalog paths answer
+| with a 307 redirect to the public web page rather than JSON.
 |
 | Authentication: Authorization: Bearer <KEY_ID>.<KEY_SECRET>
 */
@@ -90,7 +93,12 @@ async function fetchSubcategories() {
     return subcategoriesCache;
   }
 
-  const response = await httpRequest("GET", "/catalog/subcategories");
+  // The API lives under /api/endpoints/v1. The bare /catalog path answers
+  // with a 307 redirect to the public web page, not JSON.
+  const response = await httpRequest(
+    "GET",
+    "/api/endpoints/v1/catalog/subcategories"
+  );
 
   if (response.statusCode !== 200) {
     throw new Error(`Failed to fetch subcategories: ${response.statusCode}`);
@@ -119,7 +127,12 @@ async function fetchRequirements(categoryId) {
     }
   }
 
-  const response = await httpRequest("GET", `/catalog/category/${categoryId}/requirements`);
+  // Same /api/endpoints/v1 prefix. A 404 here means the category simply
+  // has no extra fields, which is the normal case.
+  const response = await httpRequest(
+    "GET",
+    `/api/endpoints/v1/catalog/category/${categoryId}/requirements`
+  );
 
   if (response.statusCode !== 200) {
     // No requirements is valid - return empty array
@@ -133,29 +146,67 @@ async function fetchRequirements(categoryId) {
 
 /*
 |--------------------------------------------------------------------------
-| FIND BLOOD STRIKE SUBCATEGORY
+| FIND A SUBCATEGORY BY PRODUCT NAME
 |--------------------------------------------------------------------------
-| Returns the subcategory object for Blood Strike, or null if not found.
+| SHOP2TOPUP does not expose the game name anywhere in its catalog API:
+| subcategories carry only a category name such as "Direct Topup", and
+| nothing links a category back to Blood Strike. Matching on the game name
+| therefore never worked, so this matches on the supplier's own product
+| name instead.
+|
+| Every sub_category_id in our catalog is set explicitly and verified, so
+| this is only a convenience for discovering an id that is not yet mapped.
 */
+const BLOOD_STRIKE_NAMES = {
+  elite: "strike pass elite",
+  premium: "strike pass premium",
+  levelup: "level up pass",
+  gold100: "100 + 5 gold",
+  gold300: "300 + 20 gold",
+  gold500: "500 + 40 gold",
+  gold1000: "1,000 + 100 gold",
+  gold2000: "2,000 + 260 gold",
+};
+
 async function findBloodStrikeSubcategory(productId) {
-  const subcategories = await fetchSubcategories();
+  const wanted = BLOOD_STRIKE_NAMES[productId];
 
-  // Look for Blood Strike subcategories
-  // SHOP2TOPUP typically has game names in the subcategory
-  const bloodStrikeSubs = subcategories.filter((sub) => {
-    const name = (sub.name || sub.title || "").toLowerCase();
-    return name.includes("blood strike") || name.includes("bloodstrike");
-  });
-
-  if (bloodStrikeSubs.length === 0) {
+  if (!wanted) {
     return null;
   }
 
-  // If we have a specific product mapping, use it
-  // Otherwise return the first Blood Strike subcategory
-  // The productId from our catalog (elite, premium, gold100, etc.) needs to map
-  // For now, return the first match - admin can override via catalog
-  return bloodStrikeSubs[0];
+  const subcategories = await fetchSubcategories();
+
+  // Blood Strike exists under identical product names across ~34
+  // "Direct Topup" variants, one per region (Direct Topup Mena, Vietnam,
+  // Indonesia, US, and so on). Our store uses the plain global category,
+  // which sub_category_id 1649 confirms, so the name must match exactly
+  // rather than loosely.
+  const isGlobal = (sub) =>
+    String(sub.category_name || "").trim().toLowerCase() ===
+    "direct topup";
+
+  const normalise = (value) =>
+    String(value || "").toLowerCase().replace(/[,+\s]/g, "");
+
+  const loose = normalise(wanted);
+
+  const named = subcategories.filter(
+    (sub) => normalise(sub.name) === loose && isGlobal(sub)
+  );
+
+  // Loose match only as a fallback, so "1,000 + 100 Gold" is still found
+  // if the supplier reformats the separators.
+  const found =
+    named[0] ||
+    subcategories.find(
+      (sub) =>
+        isGlobal(sub) &&
+        normalise(sub.name).includes(loose) &&
+        loose.length > 6
+    );
+
+  return found || null;
 }
 
 /*

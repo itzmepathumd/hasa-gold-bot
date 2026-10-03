@@ -19,7 +19,8 @@ const DEFAULT_CATALOG = {
       emoji: "🎮",
       paused: false,
       idLabel: "Player ID",
-      idExample: "123456789",
+      // Blood Strike IDs are 12 digits, not the 9-digit placeholder.
+      idExample: "586019939994",
       packages: [
         {
           id: "elite",
@@ -27,7 +28,7 @@ const DEFAULT_CATALOG = {
           price: 1100,
           paused: false,
           note: "",
-          sub_category_id: 999,
+          sub_category_id: 1649,
           requirements: [],
         },
         {
@@ -36,7 +37,7 @@ const DEFAULT_CATALOG = {
           price: 2500,
           paused: false,
           note: "",
-          sub_category_id: 1000,
+          sub_category_id: 1650,
           requirements: [],
         },
         {
@@ -45,7 +46,7 @@ const DEFAULT_CATALOG = {
           price: 600,
           paused: false,
           note: "",
-          sub_category_id: 1001,
+          sub_category_id: 1647,
           requirements: [],
         },
         {
@@ -54,7 +55,7 @@ const DEFAULT_CATALOG = {
           price: 290,
           paused: false,
           note: "",
-          sub_category_id: 1002,
+          sub_category_id: 1639,
           requirements: [],
         },
         {
@@ -63,7 +64,7 @@ const DEFAULT_CATALOG = {
           price: 850,
           paused: false,
           note: "",
-          sub_category_id: 1003,
+          sub_category_id: 1640,
           requirements: [],
         },
         {
@@ -72,7 +73,7 @@ const DEFAULT_CATALOG = {
           price: 1350,
           paused: false,
           note: "",
-          sub_category_id: 1004,
+          sub_category_id: 1641,
           requirements: [],
         },
         {
@@ -81,7 +82,7 @@ const DEFAULT_CATALOG = {
           price: 2700,
           paused: false,
           note: "",
-          sub_category_id: 1005,
+          sub_category_id: 1642,
           requirements: [],
         },
         {
@@ -90,7 +91,7 @@ const DEFAULT_CATALOG = {
           price: 5300,
           paused: false,
           note: "",
-          sub_category_id: 1006,
+          sub_category_id: 1643,
           requirements: [],
         },
       ],

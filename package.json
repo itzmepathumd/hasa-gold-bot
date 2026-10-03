@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "test": "node selftest.js && node flowtest.js && node analytest.js && node deadscan.js && node animtest.js && node abouttest.js && node suppliertest.js && node topuptest.js"
+    "test": "node selftest.js && node flowtest.js && node analytest.js && node deadscan.js && node animtest.js && node abouttest.js && node subcatTest.js && node suppliertest.js && node topuptest.js"
   },
   "keywords": [],
   "author": "",

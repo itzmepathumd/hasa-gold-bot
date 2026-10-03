@@ -1,0 +1,130 @@
+{
+  "version": 1,
+  "games": [
+    {
+      "id": "blood_strike",
+      "name": "Blood Strike",
+      "emoji": "🎮",
+      "paused": false,
+      "idLabel": "Player ID",
+      "idExample": "586019939994",
+      "packages": [
+        {
+          "id": "elite",
+          "name": "🎫 Strike Pass Elite",
+          "price": 1100,
+          "paused": false,
+          "note": "",
+          "sub_category_id": 1649,
+          "requirements": []
+        },
+        {
+          "id": "premium",
+          "name": "👑 Strike Pass Premium",
+          "price": 2500,
+          "paused": false,
+          "note": "",
+          "sub_category_id": 1650,
+          "requirements": []
+        },
+        {
+          "id": "levelup",
+          "name": "🚀 Level Up Pass",
+          "price": 600,
+          "paused": false,
+          "note": "",
+          "sub_category_id": 1647,
+          "requirements": []
+        },
+        {
+          "id": "gold100",
+          "name": "💎 100 Gold",
+          "price": 290,
+          "paused": false,
+          "note": "",
+          "sub_category_id": 1639,
+          "requirements": []
+        },
+        {
+          "id": "gold300",
+          "name": "💎 300 Gold",
+          "price": 850,
+          "paused": false,
+          "note": "",
+          "sub_category_id": 1640,
+          "requirements": []
+        },
+        {
+          "id": "gold500",
+          "name": "💎 500 Gold",
+          "price": 1350,
+          "paused": false,
+          "note": "",
+          "sub_category_id": 1641,
+          "requirements": []
+        },
+        {
+          "id": "gold1000",
+          "name": "💎 1,000 Gold",
+          "price": 2700,
+          "paused": false,
+          "note": "",
+          "sub_category_id": 1642,
+          "requirements": []
+        },
+        {
+          "id": "gold2000",
+          "name": "💎 2,000 Gold",
+          "price": 5300,
+          "paused": false,
+          "note": "",
+          "sub_category_id": 1643,
+          "requirements": []
+        }
+      ]
+    },
+    {
+      "id": "free_fire",
+      "name": "Free Fire",
+      "emoji": "🔥",
+      "paused": false,
+      "idLabel": "Player ID",
+      "idExample": "123456789",
+      "packages": [
+        {
+          "id": "weekly",
+          "name": "📅 Weekly",
+          "price": 590,
+          "paused": false,
+          "note": "",
+          "sub_category_id": 110,
+          "requirements": []
+        }
+      ]
+    }
+  ],
+  "payments": [
+    {
+      "id": "bank",
+      "emoji": "🏦",
+      "title": "Bank Transfer",
+      "paused": false,
+      "lines": [
+        "🏦 Bank: Commercial Bank",
+        "🔢 Account: 12345678",
+        "📍 Branch: Matara",
+        "👤 Name: Pathum"
+      ]
+    },
+    {
+      "id": "ezcash",
+      "emoji": "📱",
+      "title": "EZ Cash",
+      "paused": false,
+      "lines": [
+        "📱 Number: 077 535 2074",
+        "👤 Name: Pathum"
+      ]
+    }
+  ]
+}

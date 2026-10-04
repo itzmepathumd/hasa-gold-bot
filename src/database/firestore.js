@@ -24,6 +24,18 @@
 | If neither is present the project stays on its JSON store instead of
 | failing to boot, so a missing credential can never take the shop offline.
 |
+| Two transports are available and they expose the same interface:
+|
+|   grpc  The Firebase Admin SDK. Fast and native, and what a bot should run
+|         on, but gRPC requires HTTP/2.
+|   rest  The Firestore REST API. Slower per call, needs only HTTPS, so it
+|         keeps the shop on Firestore on hosts and proxies that terminate
+|         TLS and speak HTTP/1.1 only.
+|
+| FIRESTORE_TRANSPORT picks one (grpc, rest) or leaves it on auto, where
+| gRPC is tried first and REST is used if it cannot connect. See
+| firestoreRest.js for what that costs.
+|
 | No value from this file is ever logged. describeStatus() reports presence
 | flags and the project id only, which are not secret.
 */
@@ -31,6 +43,7 @@
 const admin = require("firebase-admin");
 const { getApps, getApp, deleteApp } = require("firebase-admin/app");
 const { getFirestore } = require("firebase-admin/firestore");
+const { RestFirestore } = require("./firestoreRest");
 
 /*
 | How long a Firestore call may take before the shop gives up on it and
@@ -44,6 +57,7 @@ let app = null;
 let db = null;
 let initError = null;
 let connecting = null;
+let transport = null;
 
 /**
  * True when the environment provides enough information to reach Firestore.
@@ -78,6 +92,22 @@ function shouldUseFirestore() {
   }
 
   return isConfigured() || hasApplicationDefaultCredentials();
+}
+
+/**
+ * Which transport the environment asks for. "auto" tries gRPC and falls back
+ * to REST, which is the default because it works in the most places.
+ */
+function desiredTransport() {
+  const requested = String(
+    process.env.FIRESTORE_TRANSPORT || "auto"
+  ).toLowerCase();
+
+  if (requested === "rest" || requested === "grpc") {
+    return requested;
+  }
+
+  return "auto";
 }
 
 /**
@@ -127,6 +157,15 @@ async function getDb() {
 
   connecting = (async () => {
     try {
+      const requested = desiredTransport();
+
+      if (requested === "rest") {
+        db = new RestFirestore();
+        transport = "rest";
+
+        return db;
+      }
+
       if (!app) {
         app =
           getApps().length > 0
@@ -140,9 +179,38 @@ async function getDb() {
               });
       }
 
-      db = getFirestore(app);
+      const grpcDb = getFirestore(app);
 
-      return db;
+      if (requested === "grpc") {
+        db = grpcDb;
+        transport = "grpc";
+
+        return db;
+      }
+
+      // Auto: prove gRPC actually works before committing to it, because on a
+      // host without HTTP/2 the SDK hangs rather than failing fast.
+      try {
+        await withTimeout(
+          grpcDb.collection("settings").doc("healthcheck").get(),
+          HEALTH_TIMEOUT_MS,
+          "Firestore health check"
+        );
+
+        db = grpcDb;
+        transport = "grpc";
+
+        return db;
+      } catch (error) {
+        console.warn(
+          `[DB] gRPC unavailable (${error.message}), using the Firestore REST API instead`
+        );
+
+        db = new RestFirestore();
+        transport = "rest";
+
+        return db;
+      }
     } catch (error) {
       initError = error;
 
@@ -219,6 +287,7 @@ function describeStatus() {
 
   return {
     mode,
+    transport: transport || desiredTransport(),
     explicitServiceAccount: isConfigured(),
     applicationDefault: !isConfigured() && hasApplicationDefaultCredentials(),
     projectId: process.env.FIREBASE_PROJECT_ID || process.env.GCLOUD_PROJECT || null,
@@ -232,6 +301,7 @@ function describeStatus() {
 async function closeDb() {
   db = null;
   app = null;
+  transport = null;
 
   try {
     if (getApps().length > 0) {

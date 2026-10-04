@@ -553,6 +553,52 @@ function makeOrder(overrides = {}) {
     assert.ok(!JSON.stringify(info).includes("BEGIN PRIVATE KEY"));
   });
 
+  await check("REST transport survives every value an order carries", async () => {
+    const { encodeFields, decodeFields } = require("../src/database/firestoreRest");
+
+    // The orders these encode hold strings, numbers, nulls, arrays and nested
+    // maps, so a mistake here would quietly corrupt real order data.
+    const order = makeOrder({ id: "HG-REST" });
+
+    const round = decodeFields(encodeFields(order));
+
+    assert.deepStrictEqual(
+      round,
+      order,
+      "an order did not survive a REST encode/decode round trip"
+    );
+
+    assert.strictEqual(
+      decodeFields(encodeFields({ big: 9007199254740991 })).big,
+      9007199254740991,
+      "a large integer lost precision"
+    );
+
+    assert.strictEqual(
+      decodeFields(encodeFields({ half: 0.1 })).half,
+      0.1,
+      "a non-integer number changed value"
+    );
+
+    assert.strictEqual(
+      decodeFields(encodeFields({ text: "λ රු 充值 🎮" })).text,
+      "λ රු 充值 🎮",
+      "non-ASCII text did not survive"
+    );
+
+    // undefined is not a Firestore value; it must be dropped rather than sent.
+    assert.ok(
+      !("gone" in encodeFields({ gone: undefined, kept: 1 })),
+      "an undefined value reached the wire"
+    );
+
+    assert.strictEqual(
+      decodeFields(encodeFields({ nothing: null })).nothing,
+      null,
+      "null did not survive"
+    );
+  });
+
   console.log(
     `\nALL DATABASE CHECKS PASSED  (${passed} passed, ${failed} failed)`
   );

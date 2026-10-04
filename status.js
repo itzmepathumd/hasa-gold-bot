@@ -207,6 +207,7 @@ function snapshot(context = {}, now = Date.now()) {
     uptimeText: formatUptime(uptimeSeconds(now)),
     shuttingDown: Boolean(context.shuttingDown),
     store,
+    runtime: context.runtime || {},
     catalog,
     supplier,
     checks,
@@ -318,6 +319,17 @@ function renderAdmin(snap, storeName = "HASA GOLD STORE") {
   }
 
   text += `📦 Orders\n${store.orders ?? 0}\n`;
+
+  // How updates arrive. The first thing to check when the shop has gone
+  // quiet, because on a platform that sleeps a service, polling is the reason.
+  if (snap.runtime && snap.runtime.transport) {
+    text += `\n${LINE}\n\n*RUNTIME*\n\n`;
+    text += `📡 Updates via\n${escapeMarkdown(snap.runtime.transport)}\n`;
+
+    if (snap.runtime.port) {
+      text += `🔌 Listening on\nport ${snap.runtime.port}\n`;
+    }
+  }
 
   const cat = snap.catalog || {};
 

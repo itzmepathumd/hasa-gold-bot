@@ -1,0 +1,42 @@
+# Render blueprint for HASA GOLD STORE.
+#
+# Render reads this when you create a service from the repository, so the
+# build and run commands and the health check are already set up.
+#
+# Two things are deliberately NOT in this file and must be added in the
+# Render dashboard as secret environment variables, because putting a real
+# token or key in a file that is committed to git hands it to anyone who
+# clones the repository:
+#
+#   BOT_TOKEN          from @BotFather
+#   ADMIN_ID           your Telegram user id
+#   WEBHOOK_SECRET     any long random string; keep it identical to whatever
+#                      you also set on other instances of this service
+#   FIREBASE_CLIENT_EMAIL
+#   FIREBASE_PRIVATE_KEY
+#   GOOGLE_APPLICATION_CREDENTIALS  only if you mount a key file instead
+#
+# The webhook URL cannot be written here either, because Render assigns the
+# hostname after the first deploy. Set WEBHOOK_URL to the service's public URL
+# once, then redeploy.
+services:
+  - type: web
+    name: hasa-gold-store-bot
+    runtime: node
+    plan: free
+    region: singapore
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: FIRESTORE_TRANSPORT
+        value: auto
+      # Free plans sleep after a period without traffic, and a sleeping bot
+      # answers nobody. Either upgrade to a paid instance or keep it awake with
+      # an outside pinger (UptimeRobot, cron-job.org) hitting /healthz every
+      # five minutes.
+      - key: SUPPLIER_PRODUCTION_MODE
+        value: "false"

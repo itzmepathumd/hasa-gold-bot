@@ -8,6 +8,7 @@ const playerValidate = require("./playerValidate");
 const analytics = require("./analytics");
 const anim = require("./anim");
 const botStatus = require("./status");
+const webhookServer = require("./webhookServer");
 const { SupplierAdapter } = require("./src/supplier");
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
@@ -3509,6 +3510,12 @@ function statusContext() {
       ...store,
       orders: getOrders().length,
     },
+    runtime: {
+      // How updates arrive. When the shop goes quiet this is the first thing
+      // worth knowing: on a sleeping host it is usually not polling.
+      transport,
+      port: webhookHandle ? webhookServer.port() : null,
+    },
     catalog: {
       games: games.length,
       products: games.reduce(
@@ -5361,6 +5368,9 @@ bot.telegram
 | Every handler is registered before the bot connects, so the supplier
 | client and the startup recovery both run on a complete bot.
 */
+let webhookHandle = null;
+let transport = "polling";
+
 async function startBot() {
   // The order store decides itself, and loading it has to finish before
   // recovery runs so recovery reads the same data the screens will.
@@ -5389,14 +5399,54 @@ async function startBot() {
     );
   }
 
-  await bot.launch();
+  /*
+  | Two ways to receive updates. With WEBHOOK_URL set, the platform's public
+  | HTTPS URL is registered with Telegram and this process listens for the
+  | pushes; that is what a sleeping-host platform needs. Without it the bot
+  | polls, which is how it has always run and what local use and the tests
+  | rely on.
+  */
+  if (webhookServer.shouldUseWebhook()) {
+    const secretToken = webhookServer.secret();
+
+    if (!secretToken) {
+      // Not fatal, but the webhook URL would then be open to anyone who
+      // learns it, and a forged update can approve an order.
+      console.warn(
+        "[WEBHOOK] WEBHOOK_SECRET is not set. Anyone who knows the URL " +
+          "can post fake updates to this bot. Set it before going live."
+      );
+    }
+
+    // Listen before registering: if the bind fails there is no point telling
+    // Telegram to start sending updates at nothing.
+    webhookHandle = await webhookServer.listen(bot);
+
+    try {
+      await webhookServer.register(bot);
+    } catch (error) {
+      await webhookServer.close(webhookHandle);
+      webhookHandle = null;
+
+      throw error;
+    }
+
+    // No polling is started in webhook mode, because bot.launch() is skipped
+    // entirely. Deleting the webhook here would undo the registration above,
+    // and Telegram would then deliver nothing at all.
+    transport = "webhook";
+  } else {
+    await bot.launch();
+
+    transport = "polling";
+  }
 
   // Uptime starts when the bot can actually answer, not before, so the
   // number in the status panel describes serving time rather than boot time.
   botStatus.markBoot();
 
   console.log(
-    `🚀 ${STORE_NAME} bot is running...`
+    `🚀 ${STORE_NAME} bot is running (${transport})...`
   );
 }
 
@@ -5409,6 +5459,7 @@ if (require.main === module) {
 module.exports = {
   bot,
   status: botStatus,
+  webhookServer,
   supplierAdapter,
   processAutoTopup,
   recoverTopupStatus,
@@ -5449,6 +5500,14 @@ async function shutdown(signal) {
     await bot.stop(signal);
   } catch (error) {
     console.error("[SHUTDOWN] bot.stop failed:", error.message);
+  }
+
+  // Clear the webhook before the socket goes, so a redeploy does not leave
+  // Telegram retrying a URL that is about to stop existing.
+  if (webhookHandle) {
+    await webhookServer.unregister(bot);
+    await webhookServer.close(webhookHandle);
+    webhookHandle = null;
   }
 
   await supplierAdapter.shutdown();

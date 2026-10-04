@@ -13,7 +13,7 @@
 | Authentication: Authorization: Bearer <KEY_ID>.<KEY_SECRET>
 */
 
-const https = require("https");
+const { request: shop2topupRequest } = require("./src/shop2topup/http");
 
 const API_BASE = process.env.SHOP2TOPUP_API_BASE || "https://www.shop2topup.com";
 const API_KEY = process.env.SHOP2TOPUP_API_KEY;
@@ -30,55 +30,10 @@ const CACHE_TTL = 10 * 60 * 1000; // 10 minutes
 |--------------------------------------------------------------------------
 */
 function httpRequest(method, path, body = null) {
-  return new Promise((resolve, reject) => {
-    if (!API_KEY) {
-      return reject(new Error("SHOP2TOPUP_API_KEY not configured"));
-    }
-
-    const url = new URL(path, API_BASE);
-    const options = {
-      method,
-      hostname: url.hostname,
-      port: url.port || 443,
-      path: url.pathname + url.search,
-      headers: {
-        "Authorization": `Bearer ${API_KEY}`,
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "User-Agent": "HASA-Gold-Bot/1.0",
-      },
-      timeout: 15000,
-    };
-
-    console.log(`[SHOP2TOPUP] ${method} ${url.pathname}`);
-
-    const req = https.request(options, (res) => {
-      let data = "";
-      res.on("data", (chunk) => { data += chunk; });
-      res.on("end", () => {
-        try {
-          const parsed = data ? JSON.parse(data) : {};
-          resolve({ statusCode: res.statusCode, data: parsed, headers: res.headers });
-        } catch {
-          resolve({ statusCode: res.statusCode, data: data, headers: res.headers });
-        }
-      });
-    });
-
-    req.on("error", (err) => {
-      reject(err);
-    });
-
-    req.on("timeout", () => {
-      req.destroy();
-      reject(new Error("Request timeout"));
-    });
-
-    if (body) {
-      console.log(`[SHOP2TOPUP] Request body:`, JSON.stringify(body));
-      req.write(JSON.stringify(body));
-    }
-    req.end();
+  return shop2topupRequest(method, path, {
+    baseUrl: API_BASE,
+    apiKey: API_KEY,
+    body,
   });
 }
 
@@ -151,8 +106,8 @@ async function fetchRequirements(categoryId) {
 | SHOP2TOPUP does not expose the game name anywhere in its catalog API:
 | subcategories carry only a category name such as "Direct Topup", and
 | nothing links a category back to Blood Strike. Matching on the game name
-| therefore never worked, so this matches on the supplier's own product
-| name instead.
+| therefore never worked, so this matches on SHOP2TOPUP's own product name
+| instead.
 |
 | Every sub_category_id in our catalog is set explicitly and verified, so
 | this is only a convenience for discovering an id that is not yet mapped.
@@ -196,7 +151,7 @@ async function findBloodStrikeSubcategory(productId) {
   );
 
   // Loose match only as a fallback, so "1,000 + 100 Gold" is still found
-  // if the supplier reformats the separators.
+  // if SHOP2TOPUP reformats the separators.
   const found =
     named[0] ||
     subcategories.find(

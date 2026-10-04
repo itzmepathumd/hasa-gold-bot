@@ -230,7 +230,7 @@ const STATE_WORD = {
 function snapshot(context = {}, now = Date.now()) {
   const store = context.store || {};
   const catalog = context.catalog || {};
-  const supplier = context.supplier || {};
+  const provider = context.provider || {};
 
   const checks = [
     {
@@ -271,7 +271,7 @@ function snapshot(context = {}, now = Date.now()) {
     store,
     runtime: context.runtime || {},
     catalog,
-    supplier,
+    provider,
     checks,
   };
 }
@@ -402,15 +402,15 @@ function renderAdmin(snap, storeName = "HASA GOLD STORE") {
     text += `💳 Payment methods\n${(cat.payments ?? 0) > 0 ? "available" : "NONE CONFIGURED"}\n`;
   }
 
-  const supplier = snap.supplier || {};
+  const provider = snap.provider || {};
 
-  if (supplier.mode || supplier.available !== undefined) {
+  if (provider.mode || provider.available !== undefined) {
     text += `\n${LINE}\n\n*TOP-UP PROVIDER*\n\n`;
-    text += `🔌 Mode\n${escapeMarkdown(supplier.mode || "unknown")}\n`;
-    text += `🤝 Connected\n${supplier.available ? "yes" : "no"}\n`;
+    text += `🔌 Mode\n${escapeMarkdown(provider.mode || "unknown")}\n`;
+    text += `🤝 Ready\n${provider.available ? "yes" : "no"}\n`;
 
-    if (supplier.detail) {
-      text += `ℹ️ ${escapeMarkdown(supplier.detail)}\n`;
+    if (provider.detail) {
+      text += `ℹ️ ${escapeMarkdown(provider.detail)}\n`;
     }
   }
 
@@ -443,7 +443,9 @@ const NEVER_SHOW = [
   "rest",
   "transport",
   "project",
+  "provider",
   "supplier",
+  "shop2topup",
   "tikka",
   "credential",
   "private key",

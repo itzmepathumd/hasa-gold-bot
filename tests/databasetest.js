@@ -136,7 +136,7 @@ function makeOrder(overrides = {}) {
 
   await check("every field of an order is preserved", async () => {
     const fake = useFakeFirestore();
-    const original = makeOrder({ id: "HG-FULL", topupError: "x", supplierTransactionId: "t-1" });
+    const original = makeOrder({ id: "HG-FULL", topupError: "x", providerOrderId: "order-uuid-1" });
 
     await fake.collection("orders").doc(original.id).set(original);
     await orders.hydrate();
@@ -148,7 +148,7 @@ function makeOrder(overrides = {}) {
     assert.strictEqual(stored.productName, "📅 Weekly");
     assert.strictEqual(stored.price, 590);
     assert.strictEqual(stored.status, "pending_payment");
-    assert.strictEqual(stored.supplierTransactionId, "t-1");
+    assert.strictEqual(stored.providerOrderId, "order-uuid-1");
     assert.strictEqual(stored.topupError, "x");
   });
 

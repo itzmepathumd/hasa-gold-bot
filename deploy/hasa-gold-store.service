@@ -5,10 +5,11 @@
 #   systemctl enable --now hasa-gold-store
 #
 # The restart policy is the point of this file. The bot holds a Telegram
-# session and an MTProto connection to the supplier; if either drops, or the
+# session and pays for top-ups through the SHOP2TOPUP order API; if the
 # process dies, systemd brings it back within seconds. A top-up in flight at
-# the moment of a crash is left in topup_processing and recovered on the next
-# start, which is why Restart=always is safe rather than merely convenient.
+# the moment of a crash is left in topup_processing and read back from the
+# provider by its order id on the next start, so a restart cannot charge a
+# customer twice.
 
 [Unit]
 Description=HASA GOLD STORE Telegram bot
@@ -33,8 +34,9 @@ ExecStart=/usr/bin/node index.js
 Environment=NODE_ENV=production
 EnvironmentFile=/home/ubuntu/hasa-gold-bot/.env
 
-# Graceful shutdown matters here: the supplier client owns a second socket
-# and has to be closed deliberately or the process lingers after the bot stops.
+# Graceful shutdown matters here: the bot schedules its own provider lookups
+# and has to cancel them deliberately, or the process lingers after the bot
+# stops.
 KillSignal=SIGTERM
 TimeoutStopSec=30
 

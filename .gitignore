@@ -1,10 +1,5 @@
 node_modules/
 
-# supplier_session.json stays ignored on purpose: it is a Telegram user
-# session that grants full account access, not project data. It is
-# regenerable with a one-time login code, so there is nothing to keep.
-supplier_session.json
-
 # A half-written temp file must never be committed.
 orders.json.tmp
 

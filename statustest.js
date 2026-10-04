@@ -45,7 +45,7 @@ function freshSnapshot(overrides = {}) {
         orders: 14,
       },
       catalog: { games: 2, products: 9, payments: 2 },
-      supplier: { mode: "test", available: false, detail: "No real top-ups are sent" },
+      provider: { mode: "test", available: false, detail: "No real top-ups are sent" },
       shuttingDown: false,
       ...overrides,
     },
@@ -220,7 +220,7 @@ check("the admin panel shows the mirror and order count", () => {
 });
 
 check("the admin panel shows the top-up provider mode", () => {
-  assert.ok(/test/i.test(adminText), "supplier mode missing");
+  assert.ok(/test/i.test(adminText), "provider mode missing");
 });
 
 check("the admin panel marks itself as the internal view", () => {
@@ -286,8 +286,11 @@ check("the customer panel never names the project or region", () => {
   assert.ok(!/asia-|google/i.test(customerText), "region named");
 });
 
-check("the customer panel never mentions the top-up partner", () => {
-  assert.ok(!/supplier|tikka|top.?up partner/i.test(customerText), "partner named");
+check("the customer panel never names the top-up provider", () => {
+  assert.ok(
+    !/supplier|provider|shop2topup|tikka/i.test(customerText),
+    "provider named"
+  );
 });
 
 check("the customer panel never mentions credentials or transports", () => {
@@ -335,7 +338,7 @@ check("a hostile store value cannot reach a customer", () => {
         mirroredOrders: 999,
       },
       catalog: { games: 0, products: 0, payments: 0 },
-      supplier: { mode: "tikka test", available: false, detail: "supplier offline" },
+      provider: { mode: "provider test", available: false, detail: "provider offline" },
       shuttingDown: false,
     },
     NOW

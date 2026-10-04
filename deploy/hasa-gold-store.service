@@ -15,6 +15,12 @@ Description=HASA GOLD STORE Telegram bot
 After=network-online.target
 Wants=network-online.target
 
+# A restart loop caused by a bad config would otherwise burn CPU silently.
+# These belong in [Unit], not [Service]: systemd ignores them here and the
+# limit silently does nothing.
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
 [Service]
 Type=simple
 User=ubuntu
@@ -34,10 +40,6 @@ TimeoutStopSec=30
 
 Restart=always
 RestartSec=5
-
-# A restart loop caused by a bad config would otherwise burn CPU silently.
-StartLimitIntervalSec=120
-StartLimitBurst=5
 
 StandardOutput=journal
 StandardError=journal

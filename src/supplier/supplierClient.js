@@ -197,6 +197,11 @@ class SupplierClient {
 
   /**
    * Hand a supplier message to whoever is waiting for it.
+   *
+   * A message that is not after the command we sent is not this command's
+   * answer. The supplier sends a bare progress glyph ("⚡") before its real
+   * reply, and reading that as the answer lost the actual outcome: an
+   * insufficient-balance error was discarded and the order parked forever.
    */
   handleMessage(event) {
     const message = event?.message;
@@ -206,6 +211,15 @@ class SupplierClient {
     }
 
     for (const [requestId, pending] of this.pendingRequests) {
+      // Older than our command, so it belongs to an earlier exchange.
+      if (
+        pending.afterMessageId !== null &&
+        pending.afterMessageId !== undefined &&
+        message.id <= pending.afterMessageId
+      ) {
+        continue;
+      }
+
       const matched =
         !pending.filter || pending.filter(message.text, message);
 
@@ -235,9 +249,11 @@ class SupplierClient {
    * Send a command and wait for the reply.
    *
    * The waiter is registered before sending, so an instant reply is not
-   * dropped. `minReplyDelay` then holds the result long enough that a
-   * leftover message from an earlier command cannot be read as this one's
-   * answer.
+   * dropped. The id of the command we sent is then given to the waiter, so a
+   * message from before it - or a progress glyph that is not the answer -
+   * cannot be mistaken for the result. `minReplyDelay` additionally holds the
+   * result long enough that a very fast leftover cannot be read as this
+   * one's answer.
    */
   async sendAndWait(
     text,
@@ -266,6 +282,8 @@ class SupplierClient {
 
       this.pendingRequests.set(requestId, {
         filter,
+        // Filled in below, once the command's own id is known.
+        afterMessageId: null,
         resolve: (value) => {
           clearTimeout(timer);
           resolve(value);
@@ -277,6 +295,17 @@ class SupplierClient {
       this.supplierBotUsername,
       { message: text }
     );
+
+    /*
+    | Only replies newer than our command count. This is set after sending,
+    | so a reply that raced the send is not discarded; message ids increase
+    | monotonically, so anything at or below ours predates it.
+    */
+    const pending = this.pendingRequests.get(requestId);
+
+    if (pending) {
+      pending.afterMessageId = sent?.id ?? null;
+    }
 
     const result = await reply;
 

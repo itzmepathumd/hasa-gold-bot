@@ -100,6 +100,172 @@ check(
   })()
 );
 
+console.log("\n== reply parsing ==");
+
+/*
+| These are the supplier's real replies, read from its own chat history once
+| the MTProto session was working. They matter because the payment
+| confirmation is written in Unicode small caps ("Tʀᴀɴsᴀᴄᴛɪᴏɴ"), which is not
+| ASCII, so every \bword\b pattern missed it and a top-up that really was
+| paid parsed as "unknown" - the customer would be told nothing happened when
+| their money had already moved.
+|
+| Nothing here was invented: each string is a reply the supplier actually
+| sent. An earlier hand-written styled variant was dropped from this list
+| because it was misspelled and so tested the test, not the parser.
+*/
+const REAL_SUCCESS_STYLED =
+  "✅ Tʀᴀɴsᴀᴄᴛɪᴏɴ Vᴇʀɪғɪᴇᴅ!\n▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n➪ Pᴀɪᴅ     ：   520 LKR\n\n➪ Cʀᴇᴅɪᴛᴇᴅ  ： 520 LKR";
+
+const REAL_SUCCESS_BOX =
+  "Weekly 💎 TopUp Done💎✅\n\n┌──────────────────────────┐\n│ Order ID : ##2711\n│ User     : Black\"\",ZORO\n";
+
+const REAL_FAILURE_BALANCE = "❌ Insufficient LKR balance.";
+
+const REAL_FAILURE_PLAYER = "❌ Pʟᴀʏᴇʀ ɴᴏᴛ ꜰᴏᴜᴅ";
+
+console.log("\n== the reply that matters is not swallowed ==");
+
+/*
+| Observed live on the first production run. The supplier answers a command
+| with a bare progress glyph first:
+|
+|   [7016] OUT /id 8595647532 WEEKLY
+|   [7017] IN  ⚡
+|   [7018] IN  ❌ Insufficient LKR balance.
+|
+| sendAndWait took the first message to arrive, so the real answer was never
+| read. The order was stored as "unrecognised_reply", parked as needs_review,
+| and the customer was told their top-up was under review when it had
+| plainly failed for lack of supplier balance.
+*/
+const { isSubstantiveReply } = require("./src/supplier/index.js");
+
+for (const glyph of ["⚡", "⏳", "✅", "⚡⚡", "", "   "]) {
+  check(
+    `a progress-only reply ${JSON.stringify(glyph)} is not treated as the answer`,
+    isSubstantiveReply(glyph) === false
+  );
+}
+
+for (const reply of [
+  REAL_FAILURE_BALANCE,
+  REAL_SUCCESS_STYLED,
+  REAL_SUCCESS_BOX,
+  "Weekly 💎 TopUp Done💎✅",
+]) {
+  check(
+    `a real reply is accepted: ${JSON.stringify(reply.slice(0, 24))}`,
+    isSubstantiveReply(reply) === true
+  );
+}
+
+check(
+  "a reply older than the command is not taken as its answer",
+  (() => {
+    // handleMessage must skip anything at or below the id of the command we
+    // sent, so a leftover from an earlier exchange cannot settle this one.
+    const fs = require("fs");
+    const path = require("path");
+    const source = fs.readFileSync(
+      path.join(__dirname, "src", "supplier", "supplierClient.js"),
+      "utf8"
+    );
+
+    return (
+      source.includes("afterMessageId") &&
+      /message\.id\s*<=\s*pending\.afterMessageId/.test(source)
+    );
+  })()
+);
+
+check(
+  "the adapter passes a substantive-reply filter, not null",
+  (() => {
+    const fs = require("fs");
+    const path = require("path");
+    const source = fs.readFileSync(
+      path.join(__dirname, "src", "supplier", "supplierAdapter.js"),
+      "utf8"
+    );
+
+    // A null filter accepts whatever arrives first, which is the bug. The
+    // name must be the second argument. Comments sit between the arguments
+    // at the call site, so the call is read up to the closing paren with
+    // comments stripped rather than matched line by line.
+    const call = source
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/\/\/[^\n]*/g, "")
+      .match(/sendAndWait\(([^;]*?)\);/);
+
+    const args = call
+      ? call[1]
+          .split(",")
+          .map((a) => a.trim())
+          .filter(Boolean)
+      : [];
+
+    return (
+      args.length >= 4 &&
+      args[0] === "command" &&
+      args[1] === "isSubstantiveReply"
+    );
+  })()
+);
+
+check(
+  "a progress glyph followed by a real answer settles on the real answer",
+  (() => {
+    // Reproduces the live sequence rather than just unit-testing the filter:
+    // handleMessage is driven with the supplier's actual message order.
+    const { SupplierClient } = require("./src/supplier/index.js");
+    const client = new SupplierClient({ sessionFile: "/dev/null" });
+
+    const resolved = [];
+
+    // Stand in for the authenticated connection; only the reply plumbing
+    // is under test here.
+    client.isAuthorized = true;
+    client.pendingRequests.set("req-1", {
+      filter: isSubstantiveReply,
+      afterMessageId: 7016,
+      resolve: (value) => resolved.push(value),
+    });
+
+    client.handleMessage({ message: { id: 7017, text: "⚡" } });
+    client.handleMessage({
+      message: { id: 7018, text: REAL_FAILURE_BALANCE },
+    });
+
+    return (
+      resolved.length === 1 && resolved[0].messageId === 7018
+    );
+  })()
+);
+
+check(
+  "a reply from before the command is ignored entirely",
+  () => {
+    const { SupplierClient } = require("./src/supplier/index.js");
+    const client = new SupplierClient({ sessionFile: "/dev/null" });
+
+    const resolved = [];
+    client.isAuthorized = true;
+    client.pendingRequests.set("req-2", {
+      filter: isSubstantiveReply,
+      afterMessageId: 7016,
+      resolve: (value) => resolved.push(value),
+    });
+
+    // Older than the command: a leftover from the previous exchange.
+    client.handleMessage({
+      message: { id: 7015, text: REAL_FAILURE_BALANCE },
+    });
+
+    return resolved.length === 0;
+  }
+);
+
 console.log("\n== command shape ==");
 
 check(
@@ -207,30 +373,6 @@ check(
       productKey: "gold500",
     }).command === "/id 11927288867 GOLD500"
 );
-
-console.log("\n== reply parsing ==");
-
-/*
-| These are the supplier's real replies, read from its own chat history once
-| the MTProto session was working. They matter because the payment
-| confirmation is written in Unicode small caps ("Tʀᴀɴsᴀᴄᴛɪᴏɴ"), which is not
-| ASCII, so every \bword\b pattern missed it and a top-up that really was
-| paid parsed as "unknown" - the customer would be told nothing happened when
-| their money had already moved.
-|
-| Nothing here was invented: each string is a reply the supplier actually
-| sent. An earlier hand-written styled variant was dropped from this list
-| because it was misspelled and so tested the test, not the parser.
-*/
-const REAL_SUCCESS_STYLED =
-  "✅ Tʀᴀɴsᴀᴄᴛɪᴏɴ Vᴇʀɪғɪᴇᴅ!\n▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n➪ Pᴀɪᴅ     ：   520 LKR\n\n➪ Cʀᴇᴅɪᴛᴇᴅ  ： 520 LKR";
-
-const REAL_SUCCESS_BOX =
-  "Weekly 💎 TopUp Done💎✅\n\n┌──────────────────────────┐\n│ Order ID : ##2711\n│ User     : Black\"\",ZORO\n";
-
-const REAL_FAILURE_BALANCE = "❌ Insufficient LKR balance.";
-
-const REAL_FAILURE_PLAYER = "❌ Pʟᴀʏᴇʀ ɴᴏᴛ ꜰᴏᴜᴅ";
 
 check(
   "the supplier's styled payment confirmation reads as success",

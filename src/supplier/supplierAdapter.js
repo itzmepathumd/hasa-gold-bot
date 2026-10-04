@@ -26,6 +26,34 @@
 const { SupplierClient } = require("./supplierClient");
 const { SupplierParser } = require("./supplierParser");
 
+/*
+| Progress and acknowledgement glyphs the supplier emits before its real
+| reply. Seen live: it answers "/id <playerId> WEEKLY" with a bare "⚡" and
+| only then sends "❌ Insufficient LKR balance."
+|
+| Accepting the first message to arrive meant the real answer was never read:
+| the order was recorded as an unrecognised reply, parked for review, and the
+| customer was told their top-up was still being worked on when it had in
+| fact failed. A reply carrying no words carries no outcome, so these are
+| skipped rather than parsed.
+*/
+const PROGRESS_ONLY = /^[\s\p{So}\p{Sk}️]*$/u;
+
+function isSubstantiveReply(text) {
+  const trimmed = String(text ?? "").trim();
+
+  if (!trimmed) {
+    return false;
+  }
+
+  // Must contain at least one letter or digit to be an answer.
+  if (!/[\p{L}\p{N}]/u.test(trimmed)) {
+    return false;
+  }
+
+  return !PROGRESS_ONLY.test(trimmed);
+}
+
 class SupplierAdapter {
   constructor(config = {}) {
     this.client = config.client || new SupplierClient();
@@ -220,7 +248,12 @@ class SupplierAdapter {
       try {
         reply = await this.client.sendAndWait(
           command,
-          null,
+          // The supplier sends a bare progress glyph ("⚡") before its real
+          // answer. Reading that as the reply threw away the actual outcome:
+          // an insufficient-balance error was missed and the order was
+          // reported as "unrecognised" and parked, so the customer was told
+          // their top-up was under review when it had plainly failed.
+          isSubstantiveReply,
           this.config.responseTimeout,
           this.config.minReplyDelay
         );
@@ -379,4 +412,4 @@ class SupplierAdapter {
   }
 }
 
-module.exports = { SupplierAdapter };
+module.exports = { SupplierAdapter, isSubstantiveReply };

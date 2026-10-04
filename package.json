@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "test": "node selftest.js && node flowtest.js && node analytest.js && node deadscan.js && node animtest.js && node abouttest.js && node subcatTest.js && node suppliertest.js && node topuptest.js && node tests/databasetest.js && node tests/migrationtest.js",
+    "test": "node selftest.js && node flowtest.js && node analytest.js && node deadscan.js && node animtest.js && node abouttest.js && node statustest.js && node subcatTest.js && node suppliertest.js && node topuptest.js && node tests/databasetest.js && node tests/migrationtest.js",
     "migrate": "node scripts/migrate-json-to-firestore.js",
     "migrate:apply": "node scripts/migrate-json-to-firestore.js --apply"
   },

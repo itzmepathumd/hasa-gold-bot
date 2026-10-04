@@ -7,6 +7,7 @@ const catalog = require("./catalog");
 const playerValidate = require("./playerValidate");
 const analytics = require("./analytics");
 const anim = require("./anim");
+const botStatus = require("./status");
 const { SupplierAdapter } = require("./src/supplier");
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
@@ -57,6 +58,10 @@ bot.use(async (ctx, next) => {
     ctx.from?.id,
     ctx.message?.text || ctx.callbackQuery?.data || "other"
   );
+
+  // Updates only arrive while the bot is connected and polling, so their
+  // arrival is the cheapest honest proof Telegram is still talking to us.
+  botStatus.record("telegram", true, "polling");
 
   // Show the real "bot is typing..." indicator for anything that is not an
   // inline button press (those get their own spinner edit).
@@ -472,6 +477,7 @@ const LABEL = {
   cancel: "❌  CANCEL",
   products: "🛍  PACKAGES",
   about: "ℹ️  ABOUT",
+  status: "📡  STATUS",
 };
 
 function homeMenu() {
@@ -483,8 +489,9 @@ function homeMenu() {
     ],
     [
       Markup.button.callback(LABEL.about, "about"),
-      Markup.button.callback(LABEL.home, "home"),
+      Markup.button.callback(LABEL.status, "status"),
     ],
+    [Markup.button.callback(LABEL.home, "home")],
   ]);
 }
 
@@ -717,6 +724,45 @@ bot.command("about", async (ctx) => {
   await showAbout(ctx);
 });
 
+bot.command("status", async (ctx) => {
+  await showStatus(ctx);
+});
+
+/*
+|--------------------------------------------------------------------------
+| STATUS
+|--------------------------------------------------------------------------
+| Customers get the plain panel: is the shop working, and what to do if it is
+| not. The admin panel carries the internals, and this text is built from an
+| allowlist so none of them can reach a customer by accident.
+*/
+
+async function showStatus(ctx) {
+  const { customer } = renderStatusViews();
+
+  // A last line of defence. If a future field ever leaks an internal name,
+  // the customer sees a plain answer rather than the detail.
+  const leaks = botStatus.leaksInternals(customer);
+
+  if (leaks.length > 0) {
+    console.error(
+      "[STATUS] Refusing to show a customer panel containing:",
+      leaks.join(", ")
+    );
+
+    return ctx.reply(
+      `📡 *SERVICE STATUS*\n\n━━━━━━━━━━━━━━━━━━\n\n` +
+        `🟢 All systems operational\n\n` +
+        `Please try again shortly if something does not respond.`
+    );
+  }
+
+  await ctx.reply(customer, {
+    parse_mode: "HTML",
+    ...customerStatusMenu(),
+  });
+}
+
 /*
 |--------------------------------------------------------------------------
 | HOME
@@ -880,6 +926,27 @@ bot.action("about", async (ctx) => {
   // The page is long, so it is sent as a new message rather than edited
   // into the button that was tapped.
   await showAbout(ctx);
+});
+
+bot.action("status", async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+
+  await showStatus(ctx);
+});
+
+/*
+| A refresh edits in place, unlike the first open, so pressing refresh
+| repeatedly does not fill the chat with copies of the same panel.
+*/
+bot.action("status_refresh", async (ctx) => {
+  await ctx.answerCbQuery("Refreshing…").catch(() => {});
+
+  const { customer } = renderStatusViews();
+
+  await ctx.editMessageText(customer, {
+    parse_mode: "HTML",
+    ...customerStatusMenu(),
+  });
 });
 /*
 |--------------------------------------------------------------------------
@@ -1510,7 +1577,26 @@ bot.on("text", async (ctx, next) => {
       ],
       frame: 800,
       parseMode: "Markdown",
-      work: () => playerValidate.validateShop2TopupPlayer(playerId, pkg),
+      work: async () => {
+        const result = await playerValidate.validateShop2TopupPlayer(playerId, pkg);
+
+        // A rejected player ID is the API working correctly, so only a
+        // transport or service failure counts against its health. Recording it
+        // here is what lets the status panel answer without calling out.
+        if (result?.success) {
+          botStatus.record("validation", true, "last check succeeded");
+        } else if (result?.retryable) {
+          botStatus.record(
+            "validation",
+            false,
+            result.error || "player check unavailable"
+          );
+        } else {
+          botStatus.record("validation", true, "last check answered");
+        }
+
+        return result;
+      },
 
       final: (r) => {
         if (r?.success) {
@@ -3388,11 +3474,96 @@ function adminMenu() {
     ],
     [
       Markup.button.callback(
+        "📡  SYSTEM STATUS",
+        "admin_status"
+      ),
+    ],
+    [
+      Markup.button.callback(
         "🛠️  MANAGE STORE",
         "store_home"
       ),
     ],
   ]);
+}
+
+/*
+|--------------------------------------------------------------------------
+| STATUS PANEL
+|--------------------------------------------------------------------------
+| status.js decides what is true and formats it; this section supplies the
+| live values only it cannot obtain for itself and owns the routes.
+|
+| There is no live check behind the admin panel: health comes from what the
+| bot has actually done since it started, because probing on every open would
+| spend API quota to answer a question the last real result already answers.
+*/
+
+function statusContext() {
+  const store = describeOrderStore();
+  const games = catalog.getGames();
+  const supplierState = supplierAdapter.getStatus();
+
+  return {
+    store: {
+      ...store,
+      orders: getOrders().length,
+    },
+    catalog: {
+      games: games.length,
+      products: games.reduce(
+        (total, game) => total + catalog.getPackages(game.id).length,
+        0
+      ),
+      payments: catalog.getPayments().length,
+    },
+    supplier: {
+      // The mode matters more than the partner: the admin needs to see that
+      // top-ups are simulated, and why.
+      mode: supplierState.testMode ? "test" : "production",
+      available: supplierState.ready,
+      detail: supplierState.testMode
+        ? "No real top-ups are sent"
+        : supplierState.ready
+          ? `via ${supplierState.supplierBot}`
+          : "Approvals go to manual review",
+    },
+    shuttingDown: isShuttingDown,
+  };
+}
+
+function adminStatusMenu() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback("🔄  REFRESH", "admin_status_refresh")],
+    [
+      Markup.button.callback(LABEL.games, "games"),
+      Markup.button.callback("🔙  ADMIN PANEL", "admin_home"),
+    ],
+  ]);
+}
+
+function customerStatusMenu() {
+  return Markup.inlineKeyboard([
+    [
+      Markup.button.callback("🔄  REFRESH", "status_refresh"),
+      Markup.button.callback(LABEL.support, "support"),
+    ],
+    [Markup.button.callback(LABEL.home, "home")],
+  ]);
+}
+
+/*
+| Both handlers take the same snapshot, so the admin view and the customer
+| view can never describe two different moments.
+*/
+function renderStatusViews() {
+  const snap = botStatus.snapshot(statusContext());
+
+  return {
+    snap,
+    admin: botStatus.renderAdmin(snap, STORE_NAME),
+    customer: botStatus.renderCustomer(snap, STORE_NAME),
+  };
 }
 
 /*
@@ -4589,6 +4760,46 @@ bot.action("admin_all_orders", async (ctx) => {
 
 /*
 |--------------------------------------------------------------------------
+| SYSTEM STATUS
+|--------------------------------------------------------------------------
+*/
+
+bot.action("admin_status", async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+
+  if (ctx.from.id !== ADMIN_ID) {
+    return ctx.reply("⛔ Admin access only.");
+  }
+
+  const { admin } = renderStatusViews();
+
+  await ctx.editMessageText(admin, {
+    parse_mode: "Markdown",
+    ...adminStatusMenu(),
+  });
+});
+
+// Same panel, re-read. Separate callback data because a press on the same
+// button twice in a row would otherwise be answered with "edited message is
+// not modified" and look like nothing happened.
+bot.action("admin_status_refresh", async (ctx) => {
+  await ctx.answerCbQuery("Refreshing…").catch(() => {});
+
+  if (ctx.from.id !== ADMIN_ID) {
+    return ctx.reply("⛔ Admin access only.");
+  }
+
+  const { admin } = renderStatusViews();
+
+  await ctx.editMessageText(admin, {
+    parse_mode: "Markdown",
+    ...adminStatusMenu(),
+  });
+});
+
+
+/*
+|--------------------------------------------------------------------------
 | SALES STATISTICS
 |--------------------------------------------------------------------------
 */
@@ -5092,6 +5303,10 @@ const CUSTOMER_COMMANDS = [
     description: "ℹ️ Developer & contact",
   },
   {
+    command: "status",
+    description: "📡 Service status",
+  },
+  {
     command: "support",
     description: "💬 Contact customer support",
   },
@@ -5176,6 +5391,10 @@ async function startBot() {
 
   await bot.launch();
 
+  // Uptime starts when the bot can actually answer, not before, so the
+  // number in the status panel describes serving time rather than boot time.
+  botStatus.markBoot();
+
   console.log(
     `🚀 ${STORE_NAME} bot is running...`
   );
@@ -5189,6 +5408,7 @@ if (require.main === module) {
 
 module.exports = {
   bot,
+  status: botStatus,
   supplierAdapter,
   processAutoTopup,
   recoverTopupStatus,

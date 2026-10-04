@@ -259,6 +259,24 @@ check("the customer panel leaks none of the forbidden terms", () => {
   assert.deepStrictEqual(status.leaksInternals(customerText), []);
 });
 
+check("the customer panel shows the shop's clock, not UTC", () => {
+  // The customer panel carried its own toUTCString() and was missed when the
+  // admin panel was fixed, so it is asserted here explicitly. A customer in
+  // Colombo reading "09:45 GMT" has no way to tell that is stale rather than
+  // current, which is the one thing a status panel must not be.
+  assert.ok(
+    !/GMT/.test(customerText),
+    `customer panel renders a GMT clock: ${customerText.match(/.*GMT.*/)?.[0]}`
+  );
+
+  assert.ok(/Checked/.test(customerText), "customer panel has no Checked line");
+
+  assert.ok(
+    /\(UTC[+-]\d{4}\)/.test(customerText),
+    `customer panel shows no timezone offset: ${customerText.match(/.*Checked.*/)?.[0]}`
+  );
+});
+
 check("the customer panel never names the database vendor", () => {
   assert.ok(!/firestore|firebase/i.test(customerText), "vendor named");
 });

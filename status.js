@@ -469,7 +469,7 @@ function renderCustomer(snap, storeName = "HASA GOLD STORE") {
         : "🔴 <b>We are having trouble</b>";
 
   let text = `📡 <b>SERVICE STATUS</b>\n${LINE}\n\n${headline}\n\n`;
-  text += `🕐 Checked ${new Date(snap.now).toUTCString()}\n`;
+  text += `🕐 Checked ${formatCheckedAt(snap.now)}\n`;
   text += `🛍️ ${storeName}\n`;
 
   text += `\n${LINE}\n\n<b>WHAT THIS MEANS</b>\n\n`;

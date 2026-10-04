@@ -24,6 +24,22 @@ if (!ADMIN_ID) {
   process.exit(1);
 }
 
+/*
+| A wrong ADMIN_ID is otherwise invisible: the bot starts cleanly, trades
+| normally, and simply refuses every /admin with "Admin access only". That
+| reads like a permissions problem when it is really a typo in .env, so the
+| real id is printed on boot and checked for a shape Telegram ids never have.
+*/
+console.log(`👑 Admin id: ${ADMIN_ID}`);
+
+if (!Number.isSafeInteger(ADMIN_ID) || ADMIN_ID <= 0) {
+  console.error(
+    `❌ ADMIN_ID "${process.env.ADMIN_ID}" is not a Telegram user id. ` +
+      `It must be the plain numeric id, with no @ or username.`
+  );
+  process.exit(1);
+}
+
 const bot = new Telegraf(BOT_TOKEN);
 
 /*

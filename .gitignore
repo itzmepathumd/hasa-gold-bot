@@ -21,7 +21,12 @@ firebase-service-credentials.json
 gcp-key.json
 credentials.json
 
-# Local environment overrides. .env itself is tracked on purpose (see the
-# project notes), but per-machine overrides are not project data.
+# Real credentials, never tracked. A tracked .env leaked a live bot token
+# and supplier API key into history, and it is what made it easy to write a
+# deployment .env with invented values that only failed at runtime.
+# .env.example is the tracked template; .env is created per machine.
+.env
+
+# Local environment overrides.
 .env.local
 .env.*.local

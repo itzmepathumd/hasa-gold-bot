@@ -187,6 +187,33 @@ check("the admin panel shows the uptime", () => {
   assert.ok(/Uptime/i.test(adminText), "uptime missing");
 });
 
+check("the admin panel shows the shop's clock, not UTC", () => {
+  const now = Date.parse("2026-10-04T09:40:00Z");
+  const shown = status.formatCheckedAt(now);
+
+  // 09:40 UTC is 15:10 in Colombo. Showing the UTC wall clock here made the
+  // panel read five and a half hours behind the admin, which looks exactly
+  // like stale or wrong data.
+  assert.ok(
+    shown.includes("15:10"),
+    `expected the Colombo time 15:10, got "${shown}"`
+  );
+
+  assert.ok(
+    !/\b09:40\b/.test(shown),
+    `panel still shows the UTC wall clock: "${shown}"`
+  );
+
+  assert.ok(/UTC\+0530/.test(shown), `offset missing from "${shown}"`);
+});
+
+check("the admin panel never prints a bare GMT clock", () => {
+  assert.ok(
+    !/GMT/.test(adminText),
+    "admin panel renders a UTC/GMT wall clock"
+  );
+});
+
 check("the admin panel shows the mirror and order count", () => {
   assert.ok(adminText.includes("14"), "order count missing");
   assert.ok(/loaded/i.test(adminText), "mirror state missing");

@@ -1,0 +1,47 @@
+# systemd unit for the HASA GOLD STORE bot.
+#
+# Install to /etc/systemd/system/hasa-gold-store.service, then:
+#   systemctl daemon-reload
+#   systemctl enable --now hasa-gold-store
+#
+# The restart policy is the point of this file. The bot holds a Telegram
+# session and an MTProto connection to the supplier; if either drops, or the
+# process dies, systemd brings it back within seconds. A top-up in flight at
+# the moment of a crash is left in topup_processing and recovered on the next
+# start, which is why Restart=always is safe rather than merely convenient.
+
+[Unit]
+Description=HASA GOLD STORE Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/hasa-gold-bot
+
+# The bot has to be able to reach api.telegram.org, firestore.googleapis.com
+# and the SHOP2TOPUP API. Long polling means nothing has to come inbound.
+ExecStart=/usr/bin/node index.js
+
+Environment=NODE_ENV=production
+EnvironmentFile=/home/ubuntu/hasa-gold-bot/.env
+
+# Graceful shutdown matters here: the supplier client owns a second socket
+# and has to be closed deliberately or the process lingers after the bot stops.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+Restart=always
+RestartSec=5
+
+# A restart loop caused by a bad config would otherwise burn CPU silently.
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hasa-gold-store
+
+[Install]
+WantedBy=multi-user.target

@@ -1910,6 +1910,11 @@ bot.action("confirm_order", async (ctx) => {
 
     idLabel: game.idLabel,
 
+    // The same "gameId~packageId" string the products collection and the
+    // migration use. Stored at creation so an order always carries the id
+    // the supplier and the product lookup resolve against.
+    productId: `${game.id}~${pkg.id}`,
+
     productKey: pkg.id,
 
     productName: pkg.name,

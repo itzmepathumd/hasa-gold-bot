@@ -15,6 +15,90 @@
 | not, so the patterns below err towards under-reporting.
 */
 
+/*
+| Map the Unicode small-cap and fullwidth letters onto plain ASCII.
+|
+| The supplier styles parts of a reply as "Tʀᴀɴsᴀᴄᴛɪᴏɴ Vᴇʀɪғɪᴇᴅ", using
+| small capitals, IPA lookalikes and a Cyrillic glyph or two. Every pattern
+| in the parser is written against ASCII words with \b boundaries, so without
+| this the supplier's payment confirmation - the one reply that matters most -
+| could not be recognised and a paid top-up was reported as unknown.
+|
+| NFKD does not help here: these are distinct letters, not accented forms,
+| so they survive normalisation unchanged. The table below is therefore
+| explicit, keyed by code point. Deriving it by arithmetic is not possible:
+| the U+1D00 small-capital block interleaves and skips letters, so A-Z does
+| not run consecutively through it. Each entry was checked against the real
+| supplier replies.
+|
+| Folding the whole message, rather than adding a pattern per styled word,
+| keeps this working for the words the supplier styles next.
+*/
+const LATIN_FOLD = {
+  // Latin letter small capitals (U+1D00 block, not sequential).
+  0x1d00: "a", 0x1d01: "b", 0x1d04: "c", 0x1d05: "d", 0x1d07: "e",
+  0x1d29: "h", 0x1d0f: "o", 0x1d16: "p", 0x1d1b: "t", 0x1d20: "v",
+  0x1d21: "w", 0x1d22: "x", 0x1d23: "y", 0x1d24: "z", 0x1d25: "s",
+
+  // IPA extensions used as small-capital lookalikes.
+  0x0280: "r", // turned r
+  0x0274: "n", // small capital eng
+  0x026a: "i", // small capital i
+  0x026f: "m", // small capital turned m
+  0x0254: "o", // open o
+  0x0250: "a", // turned a
+  0x0251: "a", // latin small letter alpha
+  0x025c: "e", // open e
+  0x025f: "j", // small capital barred j
+  0x029f: "l", // small capital l
+  0x028f: "y", // small capital y
+  0x0299: "b", // small capital b
+  0xa730: "f", // latin letter small capital f
+
+  // Cyrillic small capitals the supplier mixes in.
+  0x0493: "r", // Cyrillic small letter rzhe
+  0x04cf: "l", // Cyrillic small palochka
+
+  // Latin letter small capital variants.
+  0x1d06: "g", 0x1d0a: "k", 0x1d10: "q", 0x1d1c: "u",
+};
+
+function isFoldable(code) {
+  return (
+    Object.prototype.hasOwnProperty.call(LATIN_FOLD, code) ||
+    (code >= 0xff01 && code <= 0xff5e)
+  );
+}
+
+/**
+ * Fold a styled message back to comparable ASCII. Non-letter characters are
+ * left alone so transaction ids and amounts survive untouched.
+ */
+function foldUnicodeText(text) {
+  let out = "";
+
+  for (const ch of String(text)) {
+    const code = ch.codePointAt(0);
+
+    if (code < 128) {
+      out += ch;
+      continue;
+    }
+
+    // Fullwidth ASCII sits a fixed distance above plain ASCII.
+    if (code >= 0xff01 && code <= 0xff5e) {
+      out += String.fromCharCode(code - 0xfee0);
+      continue;
+    }
+
+    out += Object.prototype.hasOwnProperty.call(LATIN_FOLD, code)
+      ? LATIN_FOLD[code]
+      : ch;
+  }
+
+  return out;
+}
+
 class SupplierParser {
   constructor(config = {}) {
     this.patterns = {
@@ -26,10 +110,19 @@ class SupplierParser {
         /\bdelivered\b/i,
         /\btop[\s-]?up\s+(successful|done|complete|completed|delivered)\b/i,
         /\bdone\b/i,
+        // The supplier confirms payment as "Transaction Verified" in styled
+        // small caps. Folding in parse() turns that into plain ASCII, so
+        // these two words are all that is needed for it to match.
+        /\bverified\b/i,
+        /\bcredited\b/i,
       ],
 
       invalidPlayer: config.invalidPlayerPatterns || [
-        /player[\s\w]*not[\s\w]*found/i,
+        // The supplier writes "found" with the n dropped ("foud") in its
+        // styled messages, so foun?d is matched rather than found. A missing
+        // player is unambiguous either way, and this is a failure, so
+        // tolerating the typo errs towards reporting the problem.
+        /player[\s\w]*not[\s\w]*foun?d/i,
         /invalid[\s\w]*player/i,
         /player[\s\w]*invalid/i,
         /wrong[\s\w]*id/i,
@@ -105,36 +198,50 @@ class SupplierParser {
       return result;
     }
 
-    result.transactionId = this.extractTransactionId(source);
+    /*
+    | The supplier styles some replies in Unicode small caps, so its payment
+    | confirmation arrives as "Tʀᴀɴsᴀᴄᴛɪᴏɴ Vᴇʀɪғɪᴇᴅ". Those are not ASCII
+    | letters, so \bword\b never matches them and a top-up that really was
+    | paid read as "unknown": the customer is told nothing happened when
+    | their money had already moved.
+    |
+    | Matching is therefore done on a folded copy, which turns the small-cap
+    | letters back into plain ASCII. Folding the whole message rather than
+    | adding a pattern per styled word keeps this working for every word the
+    | supplier chooses to style next.
+    */
+    const folded = foldUnicodeText(source);
+
+    result.transactionId = this.extractTransactionId(folded);
 
     // Failure reasons are checked first. A reply like "insufficient
     // balance" also contains the word "balance", and a supplier that
     // answers "try again" must not be read as a refusal.
-    if (this.matchesAny(source, this.patterns.invalidPlayer)) {
+    if (this.matchesAny(folded, this.patterns.invalidPlayer)) {
       result.status = "failed";
       result.statusDetail = "invalid_player";
       result.confidence = 0.9;
     } else if (
-      this.matchesAny(source, this.patterns.insufficientBalance)
+      this.matchesAny(folded, this.patterns.insufficientBalance)
     ) {
       result.status = "failed";
       result.statusDetail = "insufficient_balance";
       result.confidence = 0.9;
     } else if (
-      this.matchesAny(source, this.patterns.temporaryError)
+      this.matchesAny(folded, this.patterns.temporaryError)
     ) {
       result.status = "processing";
       result.statusDetail = "temporary_error";
       result.confidence = 0.7;
-    } else if (this.matchesAny(source, this.patterns.success)) {
+    } else if (this.matchesAny(folded, this.patterns.success)) {
       result.status = "success";
       result.statusDetail = "completed";
       result.confidence = 0.9;
-    } else if (this.matchesAny(source, this.patterns.failed)) {
+    } else if (this.matchesAny(folded, this.patterns.failed)) {
       result.status = "failed";
       result.statusDetail = "failed";
       result.confidence = 0.8;
-    } else if (this.matchesAny(source, this.patterns.processing)) {
+    } else if (this.matchesAny(folded, this.patterns.processing)) {
       result.status = "processing";
       result.statusDetail = "processing";
       result.confidence = 0.7;

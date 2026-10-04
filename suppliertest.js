@@ -210,6 +210,71 @@ check(
 
 console.log("\n== reply parsing ==");
 
+/*
+| These are the supplier's real replies, read from its own chat history once
+| the MTProto session was working. They matter because the payment
+| confirmation is written in Unicode small caps ("Tʀᴀɴsᴀᴄᴛɪᴏɴ"), which is not
+| ASCII, so every \bword\b pattern missed it and a top-up that really was
+| paid parsed as "unknown" - the customer would be told nothing happened when
+| their money had already moved.
+|
+| Nothing here was invented: each string is a reply the supplier actually
+| sent. An earlier hand-written styled variant was dropped from this list
+| because it was misspelled and so tested the test, not the parser.
+*/
+const REAL_SUCCESS_STYLED =
+  "✅ Tʀᴀɴsᴀᴄᴛɪᴏɴ Vᴇʀɪғɪᴇᴅ!\n▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n➪ Pᴀɪᴅ     ：   520 LKR\n\n➪ Cʀᴇᴅɪᴛᴇᴅ  ： 520 LKR";
+
+const REAL_SUCCESS_BOX =
+  "Weekly 💎 TopUp Done💎✅\n\n┌──────────────────────────┐\n│ Order ID : ##2711\n│ User     : Black\"\",ZORO\n";
+
+const REAL_FAILURE_BALANCE = "❌ Insufficient LKR balance.";
+
+const REAL_FAILURE_PLAYER = "❌ Pʟᴀʏᴇʀ ɴᴏᴛ ꜰᴏᴜᴅ";
+
+check(
+  "the supplier's styled payment confirmation reads as success",
+  parser.parse(REAL_SUCCESS_STYLED).status === "success",
+  parser.parse(REAL_SUCCESS_STYLED).status
+);
+
+check(
+  "the supplier's boxed confirmation reads as success",
+  parser.parse(REAL_SUCCESS_BOX).status === "success",
+  parser.parse(REAL_SUCCESS_BOX).status
+);
+
+check(
+  "the supplier's balance error reads as a failure",
+  parser.parse(REAL_FAILURE_BALANCE).status === "failed",
+  parser.parse(REAL_FAILURE_BALANCE).status
+);
+
+check(
+  "the supplier's styled player error reads as a failure",
+  parser.parse(REAL_FAILURE_PLAYER).status === "failed",
+  parser.parse(REAL_FAILURE_PLAYER).status
+);
+
+check(
+  "a styled reply keeps the original text for the log",
+  parser.parse(REAL_SUCCESS_STYLED).raw === REAL_SUCCESS_STYLED
+);
+
+check(
+  "folding a styled payment confirmation yields plain words",
+  (() => {
+    // "insufficient" spelled correctly in small caps still folds to itself,
+    // which is what the success pattern relies on.
+    const styled = "Cʀᴇᴅɪᴛᴇᴅ";
+    const folded = parser.parse(styled).status;
+
+    return folded === "success";
+  })()
+);
+
+console.log("\n== reply parsing ==");
+
 check(
   "a clear success is success",
   parser.parse("✅ Top-up successful").status === "success",

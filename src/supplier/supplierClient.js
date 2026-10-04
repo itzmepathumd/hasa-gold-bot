@@ -105,7 +105,11 @@ class SupplierClient {
 
     this.client.addEventHandler(
       (event) => this.handleMessage(event),
-      NewMessage({ from: this.supplierBotUsername })
+      // `new` is required: NewMessage is a class in GramJS 2.x, and calling
+      // it as a function throws "Class constructor cannot be invoked without
+      // 'new'". This line only runs in production mode, so nothing else in
+      // the suite reached it.
+      new NewMessage({ from: this.supplierBotUsername })
     );
 
     console.log(

@@ -41,6 +41,65 @@ const adapter = new SupplierAdapter({
   productMapping: { weekly: "WEEKLY" },
 });
 
+console.log("\n== the MTProto client can be constructed ==");
+
+/*
+| These checks exist because the supplier client had never been run outside
+| test mode: addEventHandler called NewMessage without `new`, which throws
+| "Class constructor cannot be invoked without 'new'" the first time a real
+| top-up was attempted. Nothing in the suite touched that path, so the whole
+| production flow was unproven until it was exercised against Telegram.
+|
+| The constructor and its event registration are checked here without a
+| network connection, which is enough to catch a class-versus-function call.
+*/
+check(
+  "the supplier client constructs without credentials",
+  (() => {
+    const { SupplierClient } = require("./src/supplier/index.js");
+
+    try {
+      const client = new SupplierClient({ sessionFile: "/dev/null" });
+
+      return client instanceof SupplierClient;
+    } catch (error) {
+      return false;
+    }
+  })()
+);
+
+check(
+  "NewMessage is constructed with new, so registering a handler cannot throw",
+  (() => {
+    const { NewMessage } = require("telegram/events");
+
+    try {
+      // Calling it as a plain function is what broke production mode.
+      return Boolean(new NewMessage({ from: "some_bot" }));
+    } catch (error) {
+      return false;
+    }
+  })()
+);
+
+check(
+  "the source registers its handler with new",
+  (() => {
+    const fs = require("fs");
+    const path = require("path");
+    const file = path.join(
+      __dirname,
+      "src",
+      "supplier",
+      "supplierClient.js"
+    );
+    const source = fs.readFileSync(file, "utf8");
+
+    // A bare NewMessage( call is the bug; new NewMessage( is the fix.
+    return !/(^|[^.\w])NewMessage\(/.test(source.replace(/new NewMessage\(/g, ""));
+  })()
+);
+
 console.log("\n== command shape ==");
 
 check(

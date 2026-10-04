@@ -124,16 +124,40 @@ class SupplierAdapter {
 
   /**
    * Can this order be sent automatically?
+   *
+   * Both halves of the command must be known. An order with no player id
+   * cannot be fulfilled even when its product name is confirmed, because the
+   * command would carry no account to credit.
    */
   canFulfill(order) {
-    return Boolean(this.resolveProductToken(order));
+    return Boolean(this.resolveProductToken(order)) && Boolean(this.playerId(order));
+  }
+
+  /**
+   * The player id, or null when there is nothing usable to send.
+   *
+   * A missing id used to reach the supplier as the literal text "undefined",
+   * because the template substitutes whatever it is given. That spends the
+   * order and credits nobody.
+   */
+  playerId(order) {
+    const raw = order?.playerId;
+
+    if (raw === undefined || raw === null) {
+      return null;
+    }
+
+    const trimmed = String(raw).trim();
+
+    return trimmed.length > 0 ? trimmed : null;
   }
 
   /**
    * Build the supplier command for an order.
    *
-   * Throws when the product name is unknown, so the caller parks the order
-   * instead of sending an invented command.
+   * Throws when the product name is unknown or the player id is missing, so
+   * the caller parks the order instead of sending an invented or empty
+   * command.
    */
   buildCommand(order) {
     const product = this.resolveProductToken(order);
@@ -146,10 +170,19 @@ class SupplierAdapter {
       );
     }
 
+    const playerId = this.playerId(order);
+
+    if (!playerId) {
+      throw new Error(
+        `Order ${order?.id || "unknown"} has no player id, so there is no ` +
+          `account to credit`
+      );
+    }
+
     return {
       product,
       command: this.config.commandTemplate
-        .replace("{playerId}", String(order.playerId).trim())
+        .replace("{playerId}", playerId)
         .replace("{product}", product),
     };
   }

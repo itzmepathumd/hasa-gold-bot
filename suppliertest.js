@@ -94,8 +94,50 @@ for (const key of [
 }
 
 check(
-  "the confirmed package is allowed",
-  adapter.canFulfill({ productKey: "weekly" })
+  "the confirmed package is allowed when the player id is present",
+  adapter.canFulfill({ productKey: "weekly", playerId: "11927288867" })
+);
+
+/*
+| A missing or blank player id used to reach the supplier as the literal
+| text "undefined" or as an empty argument, because the template
+| substitutes whatever it is handed. The order is paid, the command spends
+| nothing, and no top-up arrives.
+*/
+for (const [label, playerId] of [
+  ["missing", undefined],
+  ["null", null],
+  ["empty", ""],
+  ["whitespace", "   "],
+]) {
+  check(
+    `an order with a ${label} player id is not fulfillable`,
+    !adapter.canFulfill({ productKey: "weekly", playerId })
+  );
+
+  check(
+    `building a command with a ${label} player id throws rather than sending it`,
+    (() => {
+      try {
+        adapter.buildCommand({
+          id: "HG-BAD",
+          productKey: "weekly",
+          playerId,
+        });
+        return false;
+      } catch {
+        return true;
+      }
+    })()
+  );
+}
+
+check(
+  "a command never contains the word undefined",
+  !adapter.buildCommand({
+    productKey: "weekly",
+    playerId: "11927288867",
+  }).command.includes("undefined")
 );
 
 check(

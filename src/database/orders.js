@@ -29,7 +29,15 @@
 
 const jsonStore = require("./jsonOrders");
 const firestoreStore = require("./ordersFirestore");
-const { shouldUseFirestore, getDb, describeStatus, healthCheck, closeDb } = require("./firestore");
+const {
+  shouldUseFirestore,
+  getDb,
+  describeStatus,
+  healthCheck,
+  closeDb,
+  withTimeout,
+  LOAD_TIMEOUT_MS,
+} = require("./firestore");
 
 let mode = "json";
 let mirror = [];
@@ -86,11 +94,17 @@ async function hydrate() {
     mode = "json";
     mirrorReady = false;
 
-    return { mode, orders: 0 };
+    return { mode, orders: jsonStore.getOrders().length };
   }
 
   try {
-    mirror = await firestoreStore.fetchAllOrders();
+    // Bounded, so an unreachable Firestore costs a warning rather than a
+    // bot that sits silent through start-up.
+    mirror = await withTimeout(
+      firestoreStore.fetchAllOrders(),
+      LOAD_TIMEOUT_MS,
+      "Loading orders from Firestore"
+    );
 
     // Oldest first, matching the order the JSON file had.
     mirror.sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
@@ -110,7 +124,7 @@ async function hydrate() {
     mode = "json";
     mirrorReady = false;
 
-    return { mode, orders: 0 };
+    return { mode, orders: jsonStore.getOrders().length };
   }
 }
 

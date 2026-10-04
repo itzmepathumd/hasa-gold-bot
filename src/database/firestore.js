@@ -29,6 +29,16 @@
 */
 
 const admin = require("firebase-admin");
+const { getApps, getApp, deleteApp } = require("firebase-admin/app");
+const { getFirestore } = require("firebase-admin/firestore");
+
+/*
+| How long a Firestore call may take before the shop gives up on it and
+| carries on with the JSON store. Long enough for a normal round trip,
+| short enough that an outage is a log line rather than a dead bot.
+*/
+const HEALTH_TIMEOUT_MS = 8000;
+const LOAD_TIMEOUT_MS = 15000;
 
 let app = null;
 let db = null;
@@ -83,7 +93,7 @@ function normalizePrivateKey(raw) {
  */
 function buildCredential() {
   if (isConfigured()) {
-    return admin.credential.cert({
+    return admin.cert({
       projectId: process.env.FIREBASE_PROJECT_ID,
       clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
       // The parsed form of the PEM, never logged.
@@ -92,7 +102,7 @@ function buildCredential() {
   }
 
   // No explicit service account: let the SDK find one itself.
-  return admin.credential.applicationDefault();
+  return admin.applicationDefault();
 }
 
 /**
@@ -119,8 +129,8 @@ async function getDb() {
     try {
       if (!app) {
         app =
-          admin.apps.length > 0
-            ? admin.app()
+          getApps().length > 0
+            ? getApp()
             : admin.initializeApp({
                 credential: buildCredential(),
                 projectId:
@@ -130,7 +140,7 @@ async function getDb() {
               });
       }
 
-      db = app.firestore();
+      db = getFirestore(app);
 
       return db;
     } catch (error) {
@@ -153,6 +163,27 @@ async function getDb() {
 }
 
 /**
+ * Reject if a call takes longer than ms.
+ *
+ * Without this a Firestore outage stalls startup for as long as the gRPC
+ * client keeps retrying, which on an unreachable host is over forty
+ * seconds. The shop would look dead that whole time instead of starting on
+ * the JSON store.
+ */
+function withTimeout(promise, ms, label) {
+  let timer;
+
+  const guard = new Promise((resolve, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${label} timed out after ${ms}ms`)),
+      ms
+    );
+  });
+
+  return Promise.race([promise, guard]).finally(() => clearTimeout(timer));
+}
+
+/**
  * Verify the connection actually works, not merely that it was constructed.
  * Returns { ok, error }. Never throws.
  */
@@ -168,7 +199,11 @@ async function healthCheck() {
     }
 
     // A cheap read that proves credentials, network and rules all line up.
-    await database.collection("settings").doc("healthcheck").get();
+    await withTimeout(
+      database.collection("settings").doc("healthcheck").get(),
+      HEALTH_TIMEOUT_MS,
+      "Firestore health check"
+    );
 
     return { ok: true, error: null };
   } catch (error) {
@@ -199,8 +234,8 @@ async function closeDb() {
   app = null;
 
   try {
-    if (admin.apps.length > 0) {
-      await admin.app().delete();
+    if (getApps().length > 0) {
+      await deleteApp(getApp());
     }
   } catch (error) {
     // Nothing useful to do while shutting down.
@@ -223,6 +258,8 @@ function __setDbForTests(injected) {
 
 module.exports = {
   getDb,
+  withTimeout,
+  LOAD_TIMEOUT_MS,
   isConfigured,
   hasApplicationDefaultCredentials,
   shouldUseFirestore,

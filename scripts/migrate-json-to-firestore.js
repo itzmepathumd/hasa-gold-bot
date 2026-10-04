@@ -25,7 +25,7 @@
 |   node scripts/migrate-json-to-firestore.js --apply --orders-only
 */
 
-require("dotenv").config();
+require("../loadenv");
 
 const fs = require("fs");
 const path = require("path");

@@ -515,6 +515,31 @@ function makeOrder(overrides = {}) {
     );
   });
 
+  await check("an unreachable Firestore falls back instead of stalling", async () => {
+    const fake = useFakeFirestore();
+
+    // Never resolves, the way an unreachable host behaves.
+    fake.hang = true;
+
+    const started = Date.now();
+    const result = await orders.hydrate();
+    const elapsed = Date.now() - started;
+
+    fake.hang = false;
+
+    assert.strictEqual(result.mode, "json", "did not fall back to JSON");
+    assert.ok(
+      elapsed < 30000,
+      `startup waited ${elapsed}ms before giving up`
+    );
+    // The fallback must report the orders it actually loaded, not zero.
+    assert.strictEqual(
+      result.orders,
+      JSON.parse(require("fs").readFileSync(require("path").join(__dirname, "..", "orders.json"), "utf8")).length,
+      "fallback reported the wrong order count"
+    );
+  });
+
   await check("orders.describe reports the mode and counts", async () => {
     const fake = useFakeFirestore();
     await fake.collection("orders").doc("HG-D").set(makeOrder({ id: "HG-D" }));

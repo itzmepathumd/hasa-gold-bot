@@ -73,6 +73,11 @@ class FakeDocumentReference {
   }
 
   async get() {
+    if (this.store.hang) {
+      // Never settles, the way an unreachable host behaves.
+      await new Promise(() => {});
+    }
+
     if (!this.store.connected) {
       throw new Error("FakeFirestore: backend is down");
     }
@@ -185,6 +190,11 @@ class FakeQuery {
   }
 
   async get() {
+    if (this.store.hang) {
+      // Never settles, the way an unreachable host behaves.
+      await new Promise(() => {});
+    }
+
     const prefix = `${this.collectionName}/`;
     let docs = [];
 
@@ -270,6 +280,8 @@ class FakeFirestore {
     this.data = new Map();
     this.writes = 0;
     this.connected = true;
+    // When true every read hangs, to model an unreachable host.
+    this.hang = false;
     // Used to prove a transaction re-reads and retries on a conflict.
     this.transactionRetries = 0;
     // Serialises transactions, which is what makes optimistic concurrency

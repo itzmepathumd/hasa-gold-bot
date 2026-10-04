@@ -1,4 +1,4 @@
-require("dotenv").config();
+require("./loadenv");
 
 const { Telegraf, Markup, session } = require("telegraf");
 const fs = require("fs");

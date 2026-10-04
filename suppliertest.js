@@ -100,6 +100,54 @@ check(
   })()
 );
 
+check(
+  "a short payment confirmation is not lost for want of the word Credited",
+  (() => {
+    /*
+    | The multi-line confirmation matched only because it contains
+    | "Cʀᴇᴅɪᴛᴇᴅ". A shorter supplier confirmation - just the headline and the
+    | amount - folded to "Veriried" because U+0493 was mapped to r, so it did
+    | not contain "verified" and parsed as unknown. A top-up that really was
+    | paid would then be parked as unrecognised, which is the same failure
+    | mode as the progress glyph: money taken, nothing reported.
+    */
+    return (
+      parser.parse("✅ Tʀᴀɴsᴀᴄᴛɪᴏɴ Vᴇʀɪғɪᴇᴅ!\n➪ Pᴀɪᴅ : 520 LKR")
+        .status === "success"
+    );
+  })()
+);
+
+check(
+  "the styled headline alone is enough to read as success",
+  parser.parse("✅ Tʀᴀɴsᴀᴄᴛɪᴏɴ Vᴇʀɪғɪᴇᴅ!").status === "success"
+);
+
+check(
+  "the glyph the supplier uses for F is mapped to f, not r",
+  (() => {
+    const fs = require("fs");
+    const path = require("path");
+    const source = fs.readFileSync(
+      path.join(__dirname, "src", "supplier", "supplierParser.js"),
+      "utf8"
+    );
+
+    // U+0493 is F in the supplier's "Verified". Reading it as R folded that
+    // word to "Veriried", which is why the mapping is asserted directly.
+    const table = {};
+
+    for (const m of source
+      .split("const LATIN_FOLD = {")[1]
+      .split("};")[0]
+      .matchAll(/0x([0-9a-f]+):\s*"(\w)"/g)) {
+      table[parseInt(m[1], 16)] = m[2];
+    }
+
+    return table[0x493] === "f";
+  })()
+);
+
 console.log("\n== reply parsing ==");
 
 /*

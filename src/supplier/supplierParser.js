@@ -53,14 +53,17 @@ const LATIN_FOLD = {
   0x029f: "l", // small capital l
   0x028f: "y", // small capital y
   0x0299: "b", // small capital b
+  0x029c: "h", // small capital h
   0xa730: "f", // latin letter small capital f
 
-  // Cyrillic small capitals the supplier mixes in.
-  0x0493: "r", // Cyrillic small letter rzhe
+  // Cyrillic small capitals the supplier mixes in. U+0493 is F, not R: the
+  // supplier writes "Verified" with it, and reading it as R folded that to
+  // "Veriried", so a short payment confirmation stopped matching.
+  0x0493: "f", // Cyrillic small letter rzhe
   0x04cf: "l", // Cyrillic small palochka
 
   // Latin letter small capital variants.
-  0x1d06: "g", 0x1d0a: "k", 0x1d10: "q", 0x1d1c: "u",
+  0x1d06: "g", 0x1d0a: "k", 0x1d0b: "k", 0x1d10: "q", 0x1d1c: "u",
 };
 
 function isFoldable(code) {

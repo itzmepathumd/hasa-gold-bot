@@ -1,10 +1,5 @@
 node_modules/
 
-# supplier_session.json stays ignored on purpose: it is a Telegram user
-# session that grants full account access, not project data. It is
-# regenerable with a one-time login code, so there is nothing to keep.
-supplier_session.json
-
 # A half-written temp file must never be committed.
 orders.json.tmp
 
@@ -21,7 +16,12 @@ firebase-service-credentials.json
 gcp-key.json
 credentials.json
 
-# Local environment overrides. .env itself is tracked on purpose (see the
-# project notes), but per-machine overrides are not project data.
+# Real credentials, never tracked. A tracked .env leaked a live bot token
+# and supplier API key into history, and it is what made it easy to write a
+# deployment .env with invented values that only failed at runtime.
+# .env.example is the tracked template; .env is created per machine.
+.env
+
+# Local environment overrides.
 .env.local
 .env.*.local

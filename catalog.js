@@ -3,6 +3,36 @@ const crypto = require("crypto");
 
 const CATALOG_FILE = "./catalog.json";
 
+const firestoreProducts = require("./src/database/products");
+
+async function syncProductToFirestore(game, pkg) {
+  try {
+    const db = require("./src/database/firestore").getDb();
+
+    if (!db) {
+      return;
+    }
+
+    await firestoreProducts.writeProduct(game, pkg);
+  } catch (error) {
+    console.error("[CATALOG] Firestore product sync failed:", error.message);
+  }
+}
+
+async function syncPaymentToFirestore(payment) {
+  try {
+    const db = require("./src/database/firestore").getDb();
+
+    if (!db) {
+      return;
+    }
+
+    await firestoreProducts.writePaymentMethod(payment);
+  } catch (error) {
+    console.error("[CATALOG] Firestore payment sync failed:", error.message);
+  }
+}
+
 /*
 |--------------------------------------------------------------------------
 | DEFAULT CATALOG
@@ -285,7 +315,7 @@ function addGame({ name, emoji = "🎮", idLabel = "Player ID", idExample = "123
 }
 
 function updateGame(gameId, patch) {
-  return update((catalog) => {
+  const result = update((catalog) => {
     const game = catalog.games.find((g) => g.id === gameId);
 
     if (!game) return null;
@@ -298,6 +328,12 @@ function updateGame(gameId, patch) {
 
     return game;
   });
+
+  if (result) {
+    syncProductToFirestore(result, {});
+  }
+
+  return result;
 }
 
 function deleteGame(gameId) {
@@ -345,7 +381,7 @@ function addPackage(gameId, { name, price, note = "", sub_category_id, requireme
 }
 
 function updatePackage(gameId, packageId, patch) {
-  return update((catalog) => {
+  const result = update((catalog) => {
     const game = catalog.games.find((g) => g.id === gameId);
 
     if (!game) return null;
@@ -363,6 +399,16 @@ function updatePackage(gameId, packageId, patch) {
 
     return pkg;
   });
+
+  if (result) {
+    const game = getGame(gameId);
+
+    if (game) {
+      syncProductToFirestore(game, result);
+    }
+  }
+
+  return result;
 }
 
 function deletePackage(gameId, packageId) {
@@ -422,7 +468,7 @@ function addPayment({ title, emoji = "💳", lines = [] }) {
 }
 
 function updatePayment(paymentId, patch) {
-  return update((catalog) => {
+  const result = update((catalog) => {
     const payment = catalog.payments.find((p) => p.id === paymentId);
 
     if (!payment) return null;
@@ -438,6 +484,12 @@ function updatePayment(paymentId, patch) {
 
     return payment;
   });
+
+  if (result) {
+    syncPaymentToFirestore(result);
+  }
+
+  return result;
 }
 
 function togglePayment(paymentId) {
@@ -445,13 +497,7 @@ function togglePayment(paymentId) {
 
   if (!payment) return null;
 
-  return update((catalog) => {
-    const target = catalog.payments.find((p) => p.id === paymentId);
-
-    target.paused = !target.paused;
-
-    return target;
-  });
+  return updatePayment(paymentId, { paused: !payment.paused });
 }
 
 function deletePayment(paymentId) {

@@ -43,6 +43,68 @@ function markBoot(at = Date.now()) {
   bootedAt = at;
 }
 
+/*
+| The shop reads times in Colombo, so the admin panel must show Colombo.
+| toUTCString() was printing a UTC wall clock next to a local uptime, which
+| made the panel read five and a half hours behind the admin's own clock and
+| look like the bot was reporting stale data.
+|
+| The zone is named rather than assumed, so the panel stays right on a host
+| configured for any timezone, and the offset is shown so a reader can tell
+| which zone they are looking at.
+*/
+const SHOP_TIME_ZONE =
+  process.env.SHOP_TIMEZONE || "Asia/Colombo";
+
+function formatCheckedAt(now = Date.now()) {
+  const when = new Date(now);
+
+  try {
+    const text = new Intl.DateTimeFormat("en-GB", {
+      timeZone: SHOP_TIME_ZONE,
+      dateStyle: "medium",
+      timeStyle: "short",
+    }).format(when);
+
+    return `${text} (UTC${zoneOffsetLabel(SHOP_TIME_ZONE, when)})`;
+  } catch {
+    // An unknown zone name should not take the panel down with it.
+    return when.toISOString();
+  }
+}
+
+/*
+| The offset has to describe the zone being displayed, not the host.
+| getTimezoneOffset() returns the host offset, so on a UTC machine it
+| labelled a Colombo timestamp "UTC+0000" - a Colombo time next to a zero
+| offset, which is worse than showing no offset at all.
+|
+| The offset is read back out of the formatted parts instead, so the label
+| always matches the clock printed beside it. Colombo has no daylight saving,
+| but asking the formatter keeps this correct for a zone that does.
+*/
+function zoneOffsetLabel(timeZone, date) {
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      timeZoneName: "longOffset",
+    }).formatToParts(date);
+
+    const name = parts.find((p) => p.type === "timeZoneName")?.value;
+
+    // "GMT+05:30" -> "+0530"
+    const match = /GMT([+-])(\d{2}):?(\d{2})/.exec(String(name || ""));
+
+    if (!match) {
+      return "";
+    }
+
+    return `${match[1]}${match[2]}${match[3]}`;
+  } catch {
+    return "";
+  }
+}
+
 /**
  * How long the process has been up, in seconds.
  */
@@ -168,7 +230,7 @@ const STATE_WORD = {
 function snapshot(context = {}, now = Date.now()) {
   const store = context.store || {};
   const catalog = context.catalog || {};
-  const supplier = context.supplier || {};
+  const provider = context.provider || {};
 
   const checks = [
     {
@@ -209,7 +271,7 @@ function snapshot(context = {}, now = Date.now()) {
     store,
     runtime: context.runtime || {},
     catalog,
-    supplier,
+    provider,
     checks,
   };
 }
@@ -282,7 +344,7 @@ function renderAdmin(snap, storeName = "HASA GOLD STORE") {
 
   let text = `📡 *SYSTEM STATUS*\n${LINE}\n\n${headline}\n\n`;
   text += `⏱️ Uptime — ${snap.uptimeText}\n`;
-  text += `🕐 Checked — ${new Date(snap.now).toUTCString()}\n`;
+  text += `🕐 Checked — ${formatCheckedAt(snap.now)}\n`;
   text += `🛍️ ${escapeMarkdown(storeName)}\n`;
 
   text += `\n${LINE}\n\n*COMPONENTS*\n\n`;
@@ -340,15 +402,15 @@ function renderAdmin(snap, storeName = "HASA GOLD STORE") {
     text += `💳 Payment methods\n${(cat.payments ?? 0) > 0 ? "available" : "NONE CONFIGURED"}\n`;
   }
 
-  const supplier = snap.supplier || {};
+  const provider = snap.provider || {};
 
-  if (supplier.mode || supplier.available !== undefined) {
+  if (provider.mode || provider.available !== undefined) {
     text += `\n${LINE}\n\n*TOP-UP PROVIDER*\n\n`;
-    text += `🔌 Mode\n${escapeMarkdown(supplier.mode || "unknown")}\n`;
-    text += `🤝 Connected\n${supplier.available ? "yes" : "no"}\n`;
+    text += `🔌 Mode\n${escapeMarkdown(provider.mode || "unknown")}\n`;
+    text += `🤝 Ready\n${provider.available ? "yes" : "no"}\n`;
 
-    if (supplier.detail) {
-      text += `ℹ️ ${escapeMarkdown(supplier.detail)}\n`;
+    if (provider.detail) {
+      text += `ℹ️ ${escapeMarkdown(provider.detail)}\n`;
     }
   }
 
@@ -381,7 +443,9 @@ const NEVER_SHOW = [
   "rest",
   "transport",
   "project",
+  "provider",
   "supplier",
+  "shop2topup",
   "tikka",
   "credential",
   "private key",
@@ -407,7 +471,7 @@ function renderCustomer(snap, storeName = "HASA GOLD STORE") {
         : "🔴 <b>We are having trouble</b>";
 
   let text = `📡 <b>SERVICE STATUS</b>\n${LINE}\n\n${headline}\n\n`;
-  text += `🕐 Checked ${new Date(snap.now).toUTCString()}\n`;
+  text += `🕐 Checked ${formatCheckedAt(snap.now)}\n`;
   text += `🛍️ ${storeName}\n`;
 
   text += `\n${LINE}\n\n<b>WHAT THIS MEANS</b>\n\n`;
@@ -443,6 +507,7 @@ module.exports = {
   markBoot,
   uptimeSeconds,
   formatUptime,
+  formatCheckedAt,
   record,
   lastOutcome,
   isStale,

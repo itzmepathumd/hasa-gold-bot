@@ -9,7 +9,7 @@ const analytics = require("./analytics");
 const anim = require("./anim");
 const botStatus = require("./status");
 const webhookServer = require("./webhookServer");
-const { SupplierAdapter } = require("./src/supplier");
+const { Shop2TopupAdapter } = require("./src/shop2topup");
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_ID = Number(process.env.ADMIN_ID);
@@ -21,6 +21,22 @@ if (!BOT_TOKEN) {
 
 if (!ADMIN_ID) {
   console.error("❌ ADMIN_ID is missing in .env");
+  process.exit(1);
+}
+
+/*
+| A wrong ADMIN_ID is otherwise invisible: the bot starts cleanly, trades
+| normally, and simply refuses every /admin with "Admin access only". That
+| reads like a permissions problem when it is really a typo in .env, so the
+| real id is printed on boot and checked for a shape Telegram ids never have.
+*/
+console.log(`👑 Admin id: ${ADMIN_ID}`);
+
+if (!Number.isSafeInteger(ADMIN_ID) || ADMIN_ID <= 0) {
+  console.error(
+    `❌ ADMIN_ID "${process.env.ADMIN_ID}" is not a Telegram user id. ` +
+      `It must be the plain numeric id, with no @ or username.`
+  );
   process.exit(1);
 }
 
@@ -81,31 +97,37 @@ bot.use(async (ctx, next) => {
 
 /*
 |--------------------------------------------------------------------------
-| SUPPLIER
+| TOP-UP PROVIDER
 |--------------------------------------------------------------------------
-| Approving a Free Fire weekly order sends one command to
-| @tikka_auto_top_up_bot:
+| Approving an order places it with SHOP2TOPUP:
 |
-|   /id <playerId> <PRODUCT>
+|   POST /api/endpoints/v1/orders/create
+|     { order_id, sub_category_id, quantity, requirements }
 |
-| Every other package has no confirmed supplier name, so those orders go to
-| manual review rather than being sent a guessed command.
+| The wallet is charged the moment that order is created, so the order_id is
+| a UUID minted before the call and stored on the order. It is the provider's
+| idempotency key: the same UUID always returns the same order, so a retry
+| can never charge twice.
+|
+| A package with no sub_category_id was never mapped onto a provider
+| product, so those orders go to manual review rather than being sent a
+| guessed request.
 */
-const supplierAdapter = new SupplierAdapter({
-  commandTemplate: "/id {playerId} {product}",
-
-  // Free Fire "weekly" is the only confirmed supplier product name. Add a
-  // Blood Strike name here only once the supplier states it.
-  productMapping: {
-    weekly: "WEEKLY",
-  },
-
-  responseTimeout: 60000,
-
-  replyLogFile: "./supplier_replies.log",
-
+const topupProvider = new Shop2TopupAdapter({
   productionMode:
-    process.env.SUPPLIER_PRODUCTION_MODE === "true",
+    process.env.SHOP2TOPUP_PRODUCTION_MODE === "true",
+
+  // The catalog is this file's business, not the provider module's, so the
+  // product behind an order is resolved here.
+  resolveProduct: (order) => {
+    if (!order?.gameId || !order?.productKey) {
+      return null;
+    }
+
+    const found = catalog.findPackage(order.gameId, order.productKey);
+
+    return found ? found.pkg : null;
+  },
 });
 
 const STORE_NAME = "HASA GOLD STORE";
@@ -1894,6 +1916,11 @@ bot.action("confirm_order", async (ctx) => {
 
     idLabel: game.idLabel,
 
+    // The same "gameId~packageId" string the products collection and the
+    // migration use. Stored at creation so an order always carries the id
+    // SHOP2TOPUP and the product lookup resolve against.
+    productId: `${game.id}~${pkg.id}`,
+
     productKey: pkg.id,
 
     productName: pkg.name,
@@ -1916,15 +1943,24 @@ bot.action("confirm_order", async (ctx) => {
 
     rejectReason: null,
 
+    // The provider's product id, kept as a snapshot so an admin editing the
+    // catalog cannot change what an existing order buys.
+    subCategoryId: pkg.sub_category_id || null,
+
     // Automatic top-up tracking. Filled in as the order moves.
     topupStatus: null,
     topupAttempts: 0,
-    supplierTransactionId: null,
-    supplierMessageId: null,
+
+    // The provider's idempotency key. Minted when fulfilment is claimed, one
+    // step before the wallet can be charged, and never changed afterwards.
+    providerOrderId: null,
+    providerTransactionId: null,
+    providerStatus: null,
+    providerRaw: null,
+    topupRetryArmed: false,
     topupStartedAt: null,
     topupCompletedAt: null,
     topupError: null,
-    supplierRawReply: null,
   };
 
   const created = await appendOrder(order);
@@ -2261,24 +2297,36 @@ PENDING APPROVAL`;
 |--------------------------------------------------------------------------
 | AUTOMATIC TOP-UP
 |--------------------------------------------------------------------------
-| Fulfilment runs after an order is approved.
+| Fulfilment runs after an order is approved, and places the order with
+| SHOP2TOPUP.
 |
 | The rules exist to protect a paying customer:
 |
 |   - every transition goes through mutateOrder(), so two approvals at once
 |     cannot overwrite each other,
 |   - an order is claimed by moving it to topup_processing exactly once, so
-|     a double-tapped button cannot send two supplier commands,
-|   - a request whose outcome is unknown is NEVER resent, because the first
-|     one may already have been delivered,
-|   - only an explicitly positive supplier reply counts as delivered;
+|     a double-tapped button cannot place two provider orders,
+|   - the claim also mints the provider's idempotency key and stores it
+|     BEFORE anything is charged, so a crash mid-call can be looked up
+|     instead of guessed at,
+|   - a request whose outcome is unknown is NEVER resent under a new key,
+|     because the wallet may already have been charged,
+|   - only an explicitly completed provider status counts as delivered;
 |     everything else lands in needs_review for a human.
 |
-| With SUPPLIER_PRODUCTION_MODE=false nothing is sent, so an order settles
-| as needs_review rather than being reported as completed.
+| With SHOP2TOPUP_PRODUCTION_MODE=false nothing is ordered, so an order
+| settles as needs_review rather than being reported as completed.
 */
 
 const TOPUP_MAX_ATTEMPTS = 3;
+
+/*
+| The provider charges the wallet as soon as an order is created, so a
+| "pending" answer is not the end of it. These bound how long the shop keeps
+| asking before a human takes over.
+*/
+const TOPUP_POLL_INTERVAL_MS = 60 * 1000;
+const TOPUP_POLL_ATTEMPTS = 10;
 
 function isTerminalTopup(order) {
   return (
@@ -2287,10 +2335,46 @@ function isTerminalTopup(order) {
   );
 }
 
+/*
+| The idempotency key for an order, from any era of the shop: provider orders
+| carry providerOrderId, and records written by the old supplier bot carry
+| supplierTransactionId/supplierMessageId instead.
+*/
+function providerOrderKey(order) {
+  return (
+    order?.providerOrderId ||
+    order?.supplierTransactionId ||
+    order?.supplierMessageId ||
+    null
+  );
+}
+
 /**
- * Send one order to the supplier and settle the result.
+ * Send one order to the provider and settle the result.
  */
 async function processAutoTopup(orderId) {
+  // An order with no provider product is never claimed, so it never gets an
+  // idempotency key and never reaches the API. Approval normally parks these
+  // first; this is the backstop for every other path in.
+  const known = getOrders().find((o) => o.id === orderId);
+
+  if (!known) {
+    console.error(`[AUTO-TOPUP] Order ${orderId} not found`);
+    return;
+  }
+
+  if (isTerminalTopup(known)) {
+    return;
+  }
+
+  if (!topupProvider.canFulfill(known)) {
+    await settleForReview(
+      orderId,
+      "This package is not mapped to a provider product"
+    );
+    return;
+  }
+
   // The mutator reports its decision through `claim` while still returning
   // the order itself, so the stored record is never replaced by a wrapper.
   const claim = { action: null };
@@ -2301,12 +2385,17 @@ async function processAutoTopup(orderId) {
       return current;
     }
 
+    // An admin retry re-arms an order that already carries a provider order
+    // id. That is deliberate: the same UUID is reused, so the provider
+    // returns the order it already has instead of charging again.
+    const rearmed = Boolean(current.topupRetryArmed);
+
     if (
       current.topupStatus === "topup_processing" ||
-      current.supplierTransactionId
+      (providerOrderKey(current) && !rearmed)
     ) {
-      // The request already went out, so its outcome is unknown. Never
-      // resend: hand it to a human.
+      // The order already went out, so its outcome is unknown. Never
+      // resend under a new key: hand it to a human.
       claim.action = "in_flight";
       return current;
     }
@@ -2326,6 +2415,15 @@ async function processAutoTopup(orderId) {
     current.topupAttempts = attempts + 1;
     current.topupStartedAt = new Date().toISOString();
     current.topupError = null;
+
+    // The idempotency key is written here, before anything is charged. If
+    // the process dies between this save and the provider's answer, the
+    // order can still be read back by this exact UUID instead of being
+    // ordered a second time.
+    current.providerOrderId =
+      current.providerOrderId || topupProvider.newOrderId() || null;
+    current.topupRetryArmed = false;
+
     claim.action = "claimed";
 
     return current;
@@ -2358,10 +2456,10 @@ async function processAutoTopup(orderId) {
     return;
   }
 
-  // The supplier request and the "processing" notice are independent, so
+  // The provider request and the "processing" notice are independent, so
   // they run together instead of making the customer wait out the
   // animation before fulfilment even starts.
-  const request = supplierAdapter
+  const request = topupProvider
     .sendTopup(order)
     .then(
       (value) => ({ ok: true, value }),
@@ -2392,7 +2490,7 @@ async function processAutoTopup(orderId) {
         return current;
       }
 
-      // The command may still have reached the supplier, so this is
+      // The order may already have been charged, so this is
       // deliberately not a failure: a human decides.
       current.topupError = outcome.error.message;
       current.topupStatus = "needs_review";
@@ -2415,13 +2513,14 @@ async function processAutoTopup(orderId) {
       return current;
     }
 
-    current.supplierTransactionId =
-      result.transactionId || current.supplierTransactionId;
-    current.supplierMessageId =
-      result.messageId || current.supplierMessageId;
+    current.providerOrderId =
+      result.orderId || current.providerOrderId || providerOrderKey(current);
+    current.providerTransactionId =
+      result.transactionId || current.providerTransactionId;
+    current.providerStatus = result.providerStatus || null;
 
-    if (result.rawResponse) {
-      current.supplierRawReply = result.rawResponse;
+    if (result.raw) {
+      current.providerRaw = result.raw;
     }
 
     if (result.success) {
@@ -2429,15 +2528,17 @@ async function processAutoTopup(orderId) {
       current.status = "topup_completed";
       current.topupCompletedAt = new Date().toISOString();
       current.topupError = null;
+      current.providerFailed = false;
       return current;
     }
 
     current.topupError =
       result.statusDetail || result.status || "Unknown error";
 
-    // Processing, an unrecognised reply, or a timeout all mean the outcome
-    // is not yet known. Retrying could charge the customer twice, so the
-    // order is parked instead.
+    // "pending" means the wallet has been charged and the provider is still
+    // delivering. An unknown answer means the order may exist at all. Neither
+    // is a failure, and ordering again could charge twice, so the order is
+    // parked and read back from the provider instead.
     if (result.status !== "failed") {
       current.topupStatus = "needs_review";
       current.status = "needs_review";
@@ -2447,6 +2548,11 @@ async function processAutoTopup(orderId) {
     current.topupStatus = "topup_failed";
     current.status = "topup_failed";
     current.topupCompletedAt = new Date().toISOString();
+
+    // The provider refused this order, so no top-up was delivered and the
+    // customer has been told. That is not a closed sale: their money is
+    // still involved, so the order goes to the review queue for a person.
+    current.providerFailed = true;
 
     return current;
   });
@@ -2463,15 +2569,147 @@ async function processAutoTopup(orderId) {
         ? "failed"
         : "pending"
   );
+
+  if (applied.providerFailed) {
+    await notifyAdminOfReview();
+  }
+
+  // The provider may still be delivering, and the customer has already been
+  // told it is under review. Keep asking until it settles or a human takes
+  // over; this only ever reads the existing order back.
+  if (applied.topupStatus === "needs_review" && applied.providerOrderId) {
+    scheduleTopupResolution(orderId);
+  }
+}
+
+/*
+|--------------------------------------------------------------------------
+| RESOLVE A RUNNING PROVIDER ORDER
+|--------------------------------------------------------------------------
+| The provider charges at creation and delivers afterwards, so a "pending"
+| answer is the normal shape of a real top-up. This asks the provider about
+| the order that already exists, on a bounded schedule, and settles the
+| record as soon as it has an answer.
+|
+| It never places an order, so a customer cannot be charged twice by it.
+*/
+const topupResolutions = new Map();
+
+function scheduleTopupResolution(orderId, attempt = 1) {
+  if (topupResolutions.has(orderId)) {
+    return;
+  }
+
+  const timer = setTimeout(() => {
+    topupResolutions.delete(orderId);
+    resolveTopupOrder(orderId, attempt).catch((error) => {
+      console.error(
+        `[AUTO-TOPUP] Order ${orderId} resolution failed:`,
+        error.message
+      );
+    });
+  }, TOPUP_POLL_INTERVAL_MS);
+
+  // Nothing here should keep the process alive on its own.
+  timer.unref?.();
+
+  topupResolutions.set(orderId, timer);
+}
+
+async function resolveTopupOrder(orderId, attempt = 1) {
+  const order = getOrders().find((o) => o.id === orderId);
+
+  if (!order || isTerminalTopup(order) || !order.providerOrderId) {
+    return;
+  }
+
+  let result;
+
+  try {
+    result = await topupProvider.checkTopupStatus(order);
+  } catch (error) {
+    console.error(
+      `[AUTO-TOPUP] Order ${orderId} lookup failed:`,
+      error.message
+    );
+    result = { status: "unknown", statusDetail: "lookup_failed" };
+  }
+
+  if (result.status === "success" || result.status === "failed") {
+    const applied = await mutateOrder(orderId, (current) => {
+      if (isTerminalTopup(current)) {
+        return current;
+      }
+
+      if (result.transactionId) {
+        current.providerTransactionId = result.transactionId;
+      }
+
+      current.providerStatus = result.providerStatus || null;
+
+      if (result.raw) {
+        current.providerRaw = result.raw;
+      }
+
+      if (result.status === "success") {
+        current.topupStatus = "topup_completed";
+        current.status = "topup_completed";
+        current.topupCompletedAt = new Date().toISOString();
+        current.topupError = null;
+        return current;
+      }
+
+      current.topupStatus = "topup_failed";
+      current.status = "topup_failed";
+      current.topupError =
+        result.statusDetail || "The provider reported a failure";
+      current.topupCompletedAt = new Date().toISOString();
+      current.providerFailed = true;
+
+      return current;
+    });
+
+    if (applied) {
+      await notifyTopupResult(
+        applied,
+        applied.topupStatus === "topup_completed" ? "completed" : "failed"
+      );
+
+      if (applied.providerFailed) {
+        await notifyAdminOfReview();
+      }
+    }
+
+    return;
+  }
+
+  if (attempt >= TOPUP_POLL_ATTEMPTS) {
+    await settleForReview(
+      orderId,
+      `The provider has not settled this order after ${attempt} checks`
+    );
+
+    return;
+  }
+
+  scheduleTopupResolution(orderId, attempt + 1);
+}
+
+function stopTopupResolutions() {
+  for (const timer of topupResolutions.values()) {
+    clearTimeout(timer);
+  }
+
+  topupResolutions.clear();
 }
 
 /*
 |--------------------------------------------------------------------------
 | RECOVER TOP-UP STATUS
 |--------------------------------------------------------------------------
-| Resolves a request that is already with the supplier. It never sends a
-| new request, so an uncertain outcome stays uncertain instead of being paid
-| for twice.
+| Resolves an order that is already with the provider. It only reads the
+| existing order back, so an uncertain outcome stays uncertain instead of
+| being paid for twice.
 */
 async function recoverTopupStatus(orderId) {
   const order = getOrders().find(
@@ -2482,13 +2720,10 @@ async function recoverTopupStatus(orderId) {
     return;
   }
 
-  if (
-    !order.supplierTransactionId &&
-    !order.supplierMessageId
-  ) {
+  if (!providerOrderKey(order)) {
     await settleForReview(
       orderId,
-      "Supplier request state is unknown"
+      "No provider order exists for this record, so its state cannot be read"
     );
     return;
   }
@@ -2496,7 +2731,7 @@ async function recoverTopupStatus(orderId) {
   let result;
 
   try {
-    result = await supplierAdapter.checkTopupStatus(order);
+    result = await topupProvider.checkTopupStatus(order);
   } catch (error) {
     console.error(
       `[RECOVERY] Order ${orderId} lookup failed:`,
@@ -2505,15 +2740,25 @@ async function recoverTopupStatus(orderId) {
     return;
   }
 
-  // The supplier has no status command, so this is the expected path.
+  // Still running, or the provider would not say. Neither is a failure, and
+  // ordering again could charge the customer twice.
   if (result.status !== "success" && result.status !== "failed") {
-    await settleForReview(orderId, null);
+    await settleForReview(orderId, result.reason || result.statusDetail || null);
+    scheduleTopupResolution(orderId);
     return;
   }
 
   const applied = await mutateOrder(orderId, (current) => {
     if (isTerminalTopup(current)) {
       return current;
+    }
+
+    if (result.transactionId) {
+      current.providerTransactionId = result.transactionId;
+    }
+
+    if (result.raw) {
+      current.providerRaw = result.raw;
     }
 
     if (result.status === "success") {
@@ -2527,8 +2772,9 @@ async function recoverTopupStatus(orderId) {
     current.topupStatus = "topup_failed";
     current.status = "topup_failed";
     current.topupError =
-      result.statusDetail || "Supplier reported failure";
+      result.statusDetail || "The provider reported a failure";
     current.topupCompletedAt = new Date().toISOString();
+    current.providerFailed = true;
 
     return current;
   });
@@ -2543,13 +2789,17 @@ async function recoverTopupStatus(orderId) {
       ? "completed"
       : "failed"
   );
+
+  if (applied.providerFailed) {
+    await notifyAdminOfReview();
+  }
 }
 
 /*
 |--------------------------------------------------------------------------
 | SETTLE FOR REVIEW
 |--------------------------------------------------------------------------
-| Parks an order whose supplier outcome cannot be determined.
+| Parks an order whose provider outcome cannot be determined.
 */
 async function settleForReview(orderId, reason) {
   const applied = await mutateOrder(orderId, (current) => {
@@ -2637,7 +2887,7 @@ async function runStartupRecovery() {
       order.topupStatus === "topup_processing" ||
       order.topupStatus === "ready_for_topup" ||
       order.status === "needs_review" ||
-      // Paid and approved but never handed to the supplier. Approval always
+      // Paid and approved but never handed to the provider. Approval always
       // sets ready_for_topup, so this shape only appears if a write was
       // interrupted or the record predates the top-up feature. Left alone it
       // would stay invisible while the customer waits.
@@ -2654,16 +2904,13 @@ async function runStartupRecovery() {
   );
 
   for (const order of pending) {
-    if (
-      order.supplierTransactionId ||
-      order.supplierMessageId
-    ) {
+    if (providerOrderKey(order)) {
       await recoverTopupStatus(order.id);
       continue;
     }
 
     console.warn(
-      `[STARTUP] Order ${order.id}: supplier state unknown`
+      `[STARTUP] Order ${order.id}: no provider order was recorded`
     );
 
     await mutateOrder(order.id, (current) => {
@@ -2680,7 +2927,7 @@ async function runStartupRecovery() {
       current.topupStatus = "needs_review";
       current.status = "needs_review";
       current.topupError =
-        "Interrupted before the supplier request was confirmed";
+        "Interrupted before a provider order was recorded";
 
       return current;
     });
@@ -2708,7 +2955,7 @@ async function notifyAdminOfReview() {
       (order) =>
         `🧾 ${esc(order.id)}\n` +
         `   ${esc(order.productName)}\n` +
-        `   ${esc(order.topupError || "no supplier reply")}`
+        `   ${esc(order.topupError || "not settled by the provider")}`
     )
     .join("\n\n");
 
@@ -2743,9 +2990,20 @@ async function notifyAdminOfReview() {
 /**
  * Orders waiting for a human decision.
  */
+/*
+| Everything a human still has to decide on.
+|
+| Two shapes land here. An order whose outcome could not be read back is
+| parked as needs_review. An order the provider refused is marked
+| providerFailed: the customer has been told it failed, but nobody has
+| settled what happens with their money, so it waits for a person instead of
+| quietly counting as a closed sale.
+*/
 function reviewingOrders() {
   return getOrders().filter(
-    (order) => order.status === "needs_review"
+    (order) =>
+      order.status === "needs_review" ||
+      (order.providerFailed && order.status === "topup_failed")
   );
 }
 
@@ -2782,12 +3040,12 @@ const orderId = ctx.match[1];
       current.approvedAt = new Date().toISOString();
       current.topupStatus = "ready_for_topup";
       current.topupAttempts = 0;
-      current.supplierTransactionId = null;
-      current.supplierMessageId = null;
       current.topupStartedAt = null;
       current.topupCompletedAt = null;
       current.topupError = null;
-      current.supplierRawReply = null;
+      current.topupRetryArmed = false;
+      current.providerStatus = null;
+      current.providerRaw = null;
       decision.action = "approved";
 
       return current;
@@ -2809,14 +3067,15 @@ Status: ${statusBadge(approved.status)}`
     );
   }
 
-  // Only Free Fire weekly has a confirmed supplier name. Anything else is
-  // handled by a person, so the customer is not told a top-up is running.
-  const automated = supplierAdapter.canFulfill(approved);
+  // A package with no provider sub_category_id was never mapped onto a
+  // product the API can sell, so it is handled by a person and the customer
+  // is not told a top-up is running.
+  const automated = topupProvider.canFulfill(approved);
 
   if (!automated) {
     await settleForReview(
       orderId,
-      "No confirmed supplier product for this package"
+      "This package is not mapped to a provider product"
     );
   }
 
@@ -3082,7 +3341,7 @@ function reviewQueueText() {
       `🎮 ${esc(order.gameName)}\n` +
       `📦 ${esc(order.productName)}\n` +
       `🆔 ${code(order.playerId)}\n` +
-      `💬 ${esc(order.topupError || "no supplier reply")}\n\n`;
+      `💬 ${esc(order.topupError || "not settled by the provider")}\n\n`;
   }
 
   if (reviewing.length > 10) {
@@ -3113,7 +3372,8 @@ function reviewMenu() {
 
 function reviewOrderScreen(order) {
   const attempts = order.topupAttempts || 0;
-  const automated = supplierAdapter.canFulfill(order);
+  const automated = topupProvider.canFulfill(order);
+  const providerId = providerOrderKey(order);
 
   return (
     `🕵️ *REVIEW ORDER*\n` +
@@ -3127,18 +3387,23 @@ function reviewOrderScreen(order) {
     `━━━━━━━━━━━━━━━━━━\n\n` +
     `🤖 *AUTOMATION*\n\n` +
     `📤 Attempts: ${attempts} of ${TOPUP_MAX_ATTEMPTS}\n` +
-    `📦 Automated: ${automated ? "yes" : "no (no confirmed supplier name)"}\n` +
-    (order.supplierTransactionId
-      ? `🔖 Transaction:\n${code(order.supplierTransactionId)}\n`
+    `📦 Automated: ${
+      automated ? "yes" : "no (no provider product mapped)"
+    }\n` +
+    // The provider's own id for this order. It is the only safe handle:
+    // asking about this id cannot place a second order or charge again.
+    (providerId
+      ? `🔖 Provider order:\n${code(providerId)}\n`
+      : `🔖 Provider order:\nnever placed\n`) +
+    (order.providerTransactionId
+      ? `🧾 Provider reference:\n${code(order.providerTransactionId)}\n`
       : "") +
-    (order.supplierRawReply
-      ? `💬 Supplier replied:\n${code(
-          order.supplierRawReply.slice(0, 120)
-        )}\n`
+    (order.providerStatus
+      ? `📶 Provider status:\n${esc(order.providerStatus)}\n`
       : "") +
     `⚠️ Reason:\n${esc(order.topupError || "not recorded")}\n\n` +
     `━━━━━━━━━━━━━━━━━━\n\n` +
-    `👇 Check with the supplier first, then pick an outcome.`
+    `👇 Check the provider order above, then pick an outcome.`
   );
 }
 
@@ -3168,10 +3433,12 @@ function reviewOrderMenu(order, { canRetry } = { canRetry: false }) {
     ),
   ]);
 
-  // A retry can send a second supplier command, so it is only offered
-  // while attempts remain and the admin has confirmed the earlier attempt
-  // never reached the supplier.
-  if (canRetry) {
+  // A retry re-runs the provider call with the same provider order id, so
+  // it returns the order the provider already holds. That is exactly what a
+  // still-running order needs, and exactly what a refused one does not: the
+  // provider would refuse it again. So the button is offered only where a
+  // retry can still change the outcome.
+  if (canRetry && canRetryProviderOrder(order)) {
     buttons.push([
       Markup.button.callback(
         `🔄  RETRY TOP-UP`,
@@ -3193,6 +3460,19 @@ function canRetryTopup(order) {
   }
 
   return (order.topupAttempts || 0) < TOPUP_MAX_ATTEMPTS;
+}
+
+/*
+| Whether re-running the provider call could still change anything. It is
+| offered for an order the provider is still working on, never for one it
+| refused.
+*/
+function canRetryProviderOrder(order) {
+  return (
+    order.status === "needs_review" &&
+    Boolean(order.providerOrderId) &&
+    !order.providerFailed
+  );
 }
 
 /*
@@ -3364,9 +3644,12 @@ bot.action(/^review_fail_(.+)$/, async (ctx) => {
 |--------------------------------------------------------------------------
 | RETRY TOP-UP
 |--------------------------------------------------------------------------
-| Sends a second supplier command, so it is only offered while attempts
-| remain. The admin must confirm with the supplier first: if the earlier
-| command did go through, retrying delivers twice.
+| Runs the provider call again, so it is only offered while attempts remain.
+|
+| The retry keeps the order's provider id. That id is the provider's
+| idempotency key, so the retry returns the order that already exists rather
+| than buying a second one. An admin who needs a genuinely fresh purchase
+| marks the order failed and handles it off-platform.
 */
 bot.action(/^review_retry_(.+)$/, async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
@@ -3392,23 +3675,23 @@ Attempts: ${order.topupAttempts || 0} of ${TOPUP_MAX_ATTEMPTS}`
     );
   }
 
-  if (!supplierAdapter.canFulfill(order)) {
+  if (!topupProvider.canFulfill(order)) {
     return ctx.reply(
-      `⚠️ No confirmed supplier product name for this\n` +
-        `package, so it cannot be sent automatically.\n\n` +
+      `⚠️ This package is not mapped to a provider\n` +
+        `product, so it cannot be ordered automatically.\n\n` +
         `Complete or fail it by hand.`
     );
   }
 
-  // Clear the parked state so processAutoTopup will claim the order again.
+  // Re-arm the parked order. The provider id is deliberately left alone: it
+  // is what stops a retry from becoming a second purchase.
   const prepared = await mutateOrder(orderId, (current) => {
     if (current.status !== "needs_review") {
       return false;
     }
 
     current.topupStatus = "ready_for_topup";
-    current.supplierTransactionId = null;
-    current.supplierMessageId = null;
+    current.topupRetryArmed = true;
 
     return current;
   });
@@ -3503,7 +3786,7 @@ function adminMenu() {
 function statusContext() {
   const store = describeOrderStore();
   const games = catalog.getGames();
-  const supplierState = supplierAdapter.getStatus();
+  const providerState = topupProvider.getStatus();
 
   return {
     store: {
@@ -3524,16 +3807,18 @@ function statusContext() {
       ),
       payments: catalog.getPayments().length,
     },
-    supplier: {
+    provider: {
       // The mode matters more than the partner: the admin needs to see that
       // top-ups are simulated, and why.
-      mode: supplierState.testMode ? "test" : "production",
-      available: supplierState.ready,
-      detail: supplierState.testMode
+      mode: providerState.testMode ? "test" : "production",
+      available: providerState.ready,
+      detail: providerState.testMode
         ? "No real top-ups are sent"
-        : supplierState.ready
-          ? `via ${supplierState.supplierBot}`
-          : "Approvals go to manual review",
+        : providerState.ready
+          ? `via ${providerState.provider} order API`
+          : providerState.configured
+            ? "The provider is not ready, so approvals go to manual review"
+            : "No API key configured, so approvals go to manual review",
     },
     shuttingDown: isShuttingDown,
   };
@@ -5365,8 +5650,8 @@ bot.telegram
 |--------------------------------------------------------------------------
 | START BOT
 |--------------------------------------------------------------------------
-| Every handler is registered before the bot connects, so the supplier
-| client and the startup recovery both run on a complete bot.
+| Every handler is registered before the bot connects, so the top-up
+| provider and the startup recovery both run on a complete bot.
 */
 let webhookHandle = null;
 let transport = "polling";
@@ -5379,14 +5664,14 @@ async function startBot() {
   console.log(`[DB] Order store: ${store.mode} (${store.orders} order(s))`);
 
   try {
-    await supplierAdapter.initialize();
+    await topupProvider.initialize();
   } catch (error) {
     console.error(
-      "[SUPPLIER] Not available:",
+      "[TOPUP] Not available:",
       error.message
     );
     console.log(
-      "[SUPPLIER] Approvals will be held for manual review"
+      "[TOPUP] Approvals will be held for manual review"
     );
   }
 
@@ -5460,13 +5745,15 @@ module.exports = {
   bot,
   status: botStatus,
   webhookServer,
-  supplierAdapter,
+  topupProvider,
   processAutoTopup,
+  resolveTopupOrder,
   recoverTopupStatus,
   runStartupRecovery,
   settleForReview,
   notifyAdminOfReview,
   reviewingOrders,
+  reviewOrderMenu,
   getOrders,
   readOrders,
   mutateOrder,
@@ -5483,8 +5770,8 @@ module.exports = {
 |--------------------------------------------------------------------------
 | GRACEFUL SHUTDOWN
 |--------------------------------------------------------------------------
-| The supplier client owns a separate MTProto socket. It has to be dropped
-| explicitly, otherwise the process stays alive after the bot stops.
+| The provider lookups are timers the shop scheduled itself, so they are
+| cancelled on the way out rather than left to fire into a closing process.
 */
 
 let isShuttingDown = false;
@@ -5510,7 +5797,10 @@ async function shutdown(signal) {
     webhookHandle = null;
   }
 
-  await supplierAdapter.shutdown();
+  // Pending provider lookups must not outlive the process.
+  stopTopupResolutions();
+
+  await topupProvider.shutdown();
 
   await closeOrderStore();
 

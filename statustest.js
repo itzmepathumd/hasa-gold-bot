@@ -45,7 +45,7 @@ function freshSnapshot(overrides = {}) {
         orders: 14,
       },
       catalog: { games: 2, products: 9, payments: 2 },
-      supplier: { mode: "test", available: false, detail: "No real top-ups are sent" },
+      provider: { mode: "test", available: false, detail: "No real top-ups are sent" },
       shuttingDown: false,
       ...overrides,
     },
@@ -187,13 +187,40 @@ check("the admin panel shows the uptime", () => {
   assert.ok(/Uptime/i.test(adminText), "uptime missing");
 });
 
+check("the admin panel shows the shop's clock, not UTC", () => {
+  const now = Date.parse("2026-10-04T09:40:00Z");
+  const shown = status.formatCheckedAt(now);
+
+  // 09:40 UTC is 15:10 in Colombo. Showing the UTC wall clock here made the
+  // panel read five and a half hours behind the admin, which looks exactly
+  // like stale or wrong data.
+  assert.ok(
+    shown.includes("15:10"),
+    `expected the Colombo time 15:10, got "${shown}"`
+  );
+
+  assert.ok(
+    !/\b09:40\b/.test(shown),
+    `panel still shows the UTC wall clock: "${shown}"`
+  );
+
+  assert.ok(/UTC\+0530/.test(shown), `offset missing from "${shown}"`);
+});
+
+check("the admin panel never prints a bare GMT clock", () => {
+  assert.ok(
+    !/GMT/.test(adminText),
+    "admin panel renders a UTC/GMT wall clock"
+  );
+});
+
 check("the admin panel shows the mirror and order count", () => {
   assert.ok(adminText.includes("14"), "order count missing");
   assert.ok(/loaded/i.test(adminText), "mirror state missing");
 });
 
 check("the admin panel shows the top-up provider mode", () => {
-  assert.ok(/test/i.test(adminText), "supplier mode missing");
+  assert.ok(/test/i.test(adminText), "provider mode missing");
 });
 
 check("the admin panel marks itself as the internal view", () => {
@@ -232,6 +259,24 @@ check("the customer panel leaks none of the forbidden terms", () => {
   assert.deepStrictEqual(status.leaksInternals(customerText), []);
 });
 
+check("the customer panel shows the shop's clock, not UTC", () => {
+  // The customer panel carried its own toUTCString() and was missed when the
+  // admin panel was fixed, so it is asserted here explicitly. A customer in
+  // Colombo reading "09:45 GMT" has no way to tell that is stale rather than
+  // current, which is the one thing a status panel must not be.
+  assert.ok(
+    !/GMT/.test(customerText),
+    `customer panel renders a GMT clock: ${customerText.match(/.*GMT.*/)?.[0]}`
+  );
+
+  assert.ok(/Checked/.test(customerText), "customer panel has no Checked line");
+
+  assert.ok(
+    /\(UTC[+-]\d{4}\)/.test(customerText),
+    `customer panel shows no timezone offset: ${customerText.match(/.*Checked.*/)?.[0]}`
+  );
+});
+
 check("the customer panel never names the database vendor", () => {
   assert.ok(!/firestore|firebase/i.test(customerText), "vendor named");
 });
@@ -241,8 +286,11 @@ check("the customer panel never names the project or region", () => {
   assert.ok(!/asia-|google/i.test(customerText), "region named");
 });
 
-check("the customer panel never mentions the top-up partner", () => {
-  assert.ok(!/supplier|tikka|top.?up partner/i.test(customerText), "partner named");
+check("the customer panel never names the top-up provider", () => {
+  assert.ok(
+    !/supplier|provider|shop2topup|tikka/i.test(customerText),
+    "provider named"
+  );
 });
 
 check("the customer panel never mentions credentials or transports", () => {
@@ -290,7 +338,7 @@ check("a hostile store value cannot reach a customer", () => {
         mirroredOrders: 999,
       },
       catalog: { games: 0, products: 0, payments: 0 },
-      supplier: { mode: "tikka test", available: false, detail: "supplier offline" },
+      provider: { mode: "provider test", available: false, detail: "provider offline" },
       shuttingDown: false,
     },
     NOW

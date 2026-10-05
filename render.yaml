@@ -38,5 +38,5 @@ services:
       # answers nobody. Either upgrade to a paid instance or keep it awake with
       # an outside pinger (UptimeRobot, cron-job.org) hitting /healthz every
       # five minutes.
-      - key: SUPPLIER_PRODUCTION_MODE
+      - key: SHOP2TOPUP_PRODUCTION_MODE
         value: "false"

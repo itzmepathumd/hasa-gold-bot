@@ -2528,6 +2528,7 @@ async function processAutoTopup(orderId) {
       current.status = "topup_completed";
       current.topupCompletedAt = new Date().toISOString();
       current.topupError = null;
+      current.providerFailed = false;
       return current;
     }
 
@@ -2548,6 +2549,11 @@ async function processAutoTopup(orderId) {
     current.status = "topup_failed";
     current.topupCompletedAt = new Date().toISOString();
 
+    // The provider refused this order, so no top-up was delivered and the
+    // customer has been told. That is not a closed sale: their money is
+    // still involved, so the order goes to the review queue for a person.
+    current.providerFailed = true;
+
     return current;
   });
 
@@ -2563,6 +2569,10 @@ async function processAutoTopup(orderId) {
         ? "failed"
         : "pending"
   );
+
+  if (applied.providerFailed) {
+    await notifyAdminOfReview();
+  }
 
   // The provider may still be delivering, and the customer has already been
   // told it is under review. Keep asking until it settles or a human takes
@@ -2654,6 +2664,7 @@ async function resolveTopupOrder(orderId, attempt = 1) {
       current.topupError =
         result.statusDetail || "The provider reported a failure";
       current.topupCompletedAt = new Date().toISOString();
+      current.providerFailed = true;
 
       return current;
     });
@@ -2663,6 +2674,10 @@ async function resolveTopupOrder(orderId, attempt = 1) {
         applied,
         applied.topupStatus === "topup_completed" ? "completed" : "failed"
       );
+
+      if (applied.providerFailed) {
+        await notifyAdminOfReview();
+      }
     }
 
     return;
@@ -2759,6 +2774,7 @@ async function recoverTopupStatus(orderId) {
     current.topupError =
       result.statusDetail || "The provider reported a failure";
     current.topupCompletedAt = new Date().toISOString();
+    current.providerFailed = true;
 
     return current;
   });
@@ -2773,6 +2789,10 @@ async function recoverTopupStatus(orderId) {
       ? "completed"
       : "failed"
   );
+
+  if (applied.providerFailed) {
+    await notifyAdminOfReview();
+  }
 }
 
 /*
@@ -2970,9 +2990,20 @@ async function notifyAdminOfReview() {
 /**
  * Orders waiting for a human decision.
  */
+/*
+| Everything a human still has to decide on.
+|
+| Two shapes land here. An order whose outcome could not be read back is
+| parked as needs_review. An order the provider refused is marked
+| providerFailed: the customer has been told it failed, but nobody has
+| settled what happens with their money, so it waits for a person instead of
+| quietly counting as a closed sale.
+*/
 function reviewingOrders() {
   return getOrders().filter(
-    (order) => order.status === "needs_review"
+    (order) =>
+      order.status === "needs_review" ||
+      (order.providerFailed && order.status === "topup_failed")
   );
 }
 
@@ -3402,10 +3433,12 @@ function reviewOrderMenu(order, { canRetry } = { canRetry: false }) {
     ),
   ]);
 
-  // A retry re-runs the provider call, so it is only offered while attempts
-  // remain. The same provider order id is reused, so the retry cannot charge
-  // the wallet twice.
-  if (canRetry) {
+  // A retry re-runs the provider call with the same provider order id, so
+  // it returns the order the provider already holds. That is exactly what a
+  // still-running order needs, and exactly what a refused one does not: the
+  // provider would refuse it again. So the button is offered only where a
+  // retry can still change the outcome.
+  if (canRetry && canRetryProviderOrder(order)) {
     buttons.push([
       Markup.button.callback(
         `🔄  RETRY TOP-UP`,
@@ -3427,6 +3460,19 @@ function canRetryTopup(order) {
   }
 
   return (order.topupAttempts || 0) < TOPUP_MAX_ATTEMPTS;
+}
+
+/*
+| Whether re-running the provider call could still change anything. It is
+| offered for an order the provider is still working on, never for one it
+| refused.
+*/
+function canRetryProviderOrder(order) {
+  return (
+    order.status === "needs_review" &&
+    Boolean(order.providerOrderId) &&
+    !order.providerFailed
+  );
 }
 
 /*
@@ -5707,6 +5753,7 @@ module.exports = {
   settleForReview,
   notifyAdminOfReview,
   reviewingOrders,
+  reviewOrderMenu,
   getOrders,
   readOrders,
   mutateOrder,

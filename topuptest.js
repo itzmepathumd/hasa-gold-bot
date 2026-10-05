@@ -134,6 +134,7 @@ check(
   typeof botModule.processAutoTopup === "function" &&
     typeof botModule.runStartupRecovery === "function" &&
     typeof botModule.resolveTopupOrder === "function" &&
+    typeof botModule.reviewingOrders === "function" &&
     typeof botModule.topupProvider === "object"
 );
 
@@ -247,6 +248,7 @@ function stubProvider(reply, lookup) {
       order.providerOrderId === placed[0].orderId,
       String(order.providerOrderId)
     );
+
     check(
       "the order's own product id was sent",
       placed[0].subCategoryId === 110,
@@ -268,6 +270,14 @@ function stubProvider(reply, lookup) {
       "the provider status was kept",
       order.providerStatus === "completed",
       String(order.providerStatus)
+    );
+    check(
+      "a delivered order is not in the review queue",
+      order.providerFailed === false &&
+        !botModule
+          .reviewingOrders()
+          .some((o) => o.id === "HG-TEST-0001"),
+      String(order.providerFailed)
     );
 
     console.log("\n== approving twice places one order ==");
@@ -415,6 +425,22 @@ function stubProvider(reply, lookup) {
       "it is parked for a human",
       order.topupStatus === "needs_review",
       order.topupStatus
+    );
+    check(
+      "a still-running order keeps its retry button",
+      /review_retry_/.test(
+        JSON.stringify(
+          botModule.reviewOrderMenu(order, { canRetry: true })
+        )
+      ),
+      JSON.stringify(
+        botModule.reviewOrderMenu(order, { canRetry: true })
+      ).slice(0, 200)
+    );
+    check(
+      "it is not treated as a provider failure",
+      !order.providerFailed,
+      String(order.providerFailed)
     );
 
     console.log("\n== a still-running order settles when it finishes ==");
@@ -572,6 +598,29 @@ function stubProvider(reply, lookup) {
       "the reason is kept",
       order.topupError === "insufficient_balance",
       order.topupError
+    );
+    check(
+      "it is marked as a provider failure",
+      order.providerFailed === true,
+      String(order.providerFailed)
+    );
+    check(
+      "it lands in the review queue",
+      botModule
+        .reviewingOrders()
+        .some((o) => o.id === "HG-TEST-0001"),
+      JSON.stringify(
+        botModule.reviewingOrders().map((o) => o.id)
+      )
+    );
+    check(
+      "the review screen offers no retry, since the provider would refuse it again",
+      !/review_retry_/.test(
+        JSON.stringify(botModule.reviewOrderMenu(order, { canRetry: true }))
+      ),
+      JSON.stringify(
+        botModule.reviewOrderMenu(order, { canRetry: true })
+      ).slice(0, 200)
     );
 
     console.log("\n== an unmapped package is never ordered ==");

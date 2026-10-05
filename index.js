@@ -4043,7 +4043,7 @@ function packagesAdminMenu(game) {
   rows.push([
     Markup.button.callback(
       "➕  ADD PACKAGE",
-      `sapn_${game.id}`
+      `sagp_${game.id}`
     ),
   ]);
 
@@ -4603,7 +4603,7 @@ function gameAdminMenu(game) {
     [
       Markup.button.callback(
         "➕  ADD PACKAGE",
-        `sagp_new_${game.id}`
+        `sagp_${game.id}`
       ),
       Markup.button.callback(
         "✏️  EDIT GAME",

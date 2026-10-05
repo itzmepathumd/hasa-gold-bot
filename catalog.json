@@ -99,6 +99,177 @@
           "note": "",
           "sub_category_id": 110,
           "requirements": []
+        },
+        {
+          "id": "25_diamonds",
+          "name": "25 Diamonds",
+          "price": 0,
+          "paused": true,
+          "note": "Provider USD 0.281059",
+          "sub_category_id": 101,
+          "requirements": []
+        },
+        {
+          "id": "100_diamonds",
+          "name": "100 Diamonds",
+          "price": 0,
+          "paused": true,
+          "note": "Provider USD 1.080996",
+          "sub_category_id": 102,
+          "requirements": []
+        },
+        {
+          "id": "310_diamonds",
+          "name": "310 Diamonds",
+          "price": 0,
+          "paused": true,
+          "note": "Provider USD 3.242988",
+          "sub_category_id": 103,
+          "requirements": []
+        },
+        {
+          "id": "520_diamonds",
+          "name": "520 Diamonds",
+          "price": 0,
+          "paused": true,
+          "note": "Provider USD 5.40498",
+          "sub_category_id": 104,
+          "requirements": []
+        },
+        {
+          "id": "1_060_diamonds",
+          "name": "1,060 Diamonds",
+          "price": 0,
+          "paused": true,
+          "note": "Provider USD 10.80996",
+          "sub_category_id": 105,
+          "requirements": []
+        },
+        {
+          "id": "2_180_diamonds",
+          "name": "2,180 Diamonds",
+          "price": 0,
+          "paused": true,
+          "note": "Provider USD 21.61992",
+          "sub_category_id": 106,
+          "requirements": []
+        },
+        {
+          "id": "5_600_diamonds",
+          "name": "5,600 Diamonds",
+          "price": 0,
+          "paused": true,
+          "note": "Provider USD 54.0498",
+          "sub_category_id": 107,
+          "requirements": []
+        },
+        {
+          "id": "11_500_diamonds",
+          "name": "11,500 Diamonds",
+          "price": 0,
+          "paused": true,
+          "note": "Provider USD 85.398684",
+          "sub_category_id": 108,
+          "requirements": []
+        },
+        {
+          "id": "weekly_lite",
+          "name": "Weekly Lite",
+          "price": 0,
+          "paused": true,
+          "note": "Provider USD 0.302679",
+          "sub_category_id": 109,
+          "requirements": []
+        },
+        {
+          "id": "monthly_membership",
+          "name": "Monthly Membership",
+          "price": 0,
+          "paused": true,
+          "note": "Provider USD 8.626348",
+          "sub_category_id": 111,
+          "requirements": []
+        },
+        {
+          "id": "evo_access_3d",
+          "name": "Evo Access 3D",
+          "price": 0,
+          "paused": true,
+          "note": "Provider USD 0.605358",
+          "sub_category_id": 112,
+          "requirements": []
+        },
+        {
+          "id": "evo_access_7d",
+          "name": "Evo Access 7D",
+          "price": 0,
+          "paused": true,
+          "note": "Provider USD 0.908037",
+          "sub_category_id": 113,
+          "requirements": []
+        },
+        {
+          "id": "evo_access_30d",
+          "name": "Evo Access 30D",
+          "price": 0,
+          "paused": true,
+          "note": "Provider USD 2.378191",
+          "sub_category_id": 114,
+          "requirements": []
+        },
+        {
+          "id": "level_up_package_level_6",
+          "name": "Level Up Package - Level 6",
+          "price": 0,
+          "paused": true,
+          "note": "Provider USD 0.345919",
+          "sub_category_id": 115,
+          "requirements": []
+        },
+        {
+          "id": "level_up_package_level_1",
+          "name": "Level Up Package - Level 10",
+          "price": 0,
+          "paused": true,
+          "note": "Provider USD 0.735077",
+          "sub_category_id": 116,
+          "requirements": []
+        },
+        {
+          "id": "level_up_package_level_1_88",
+          "name": "Level Up Package - Level 15",
+          "price": 0,
+          "paused": true,
+          "note": "Provider USD 0.735077",
+          "sub_category_id": 117,
+          "requirements": []
+        },
+        {
+          "id": "level_up_package_level_2",
+          "name": "Level Up Package - Level 20",
+          "price": 0,
+          "paused": true,
+          "note": "Provider USD 0.735077",
+          "sub_category_id": 118,
+          "requirements": []
+        },
+        {
+          "id": "level_up_package_level_2_78",
+          "name": "Level Up Package - Level 25",
+          "price": 0,
+          "paused": true,
+          "note": "Provider USD 0.735077",
+          "sub_category_id": 119,
+          "requirements": []
+        },
+        {
+          "id": "level_up_package_level_3",
+          "name": "Level Up Package - Level 30",
+          "price": 0,
+          "paused": true,
+          "note": "Provider USD 1.080996",
+          "sub_category_id": 120,
+          "requirements": []
         }
       ]
     }

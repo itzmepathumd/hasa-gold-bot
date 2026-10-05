@@ -29,6 +29,8 @@ const catalog = require("../catalog");
 |   --game=NAME     a big_category_name from the provider, or a local game id.
 |                   Repeatable. Defaults to every game already in this shop.
 |   --category=ID   only this provider category id. Repeatable.
+|   --country=CODE  only categories serving this ISO country code. Repeatable.
+|   --region=NAME   only categories in this region name. Repeatable.
 |   --price=N       LKR price to give each package. Default 0.
 |   --live          add packages unpaused. Default is paused, so a package
 |                   with no price set cannot be ordered by mistake.
@@ -45,7 +47,7 @@ const API_BASE = "/api/endpoints/v1/catalog";
 */
 
 function parseArgs(argv) {
-  const args = { games: [], categories: [], price: 0, live: false, apply: false };
+  const args = { games: [], categories: [], countries: [], regions: [], price: 0, live: false, apply: false };
 
   for (const raw of argv) {
     const [flag, ...rest] = raw.split("=");
@@ -55,6 +57,8 @@ function parseArgs(argv) {
     else if (flag === "--live") args.live = true;
     else if (flag === "--game") args.games.push(value);
     else if (flag === "--category") args.categories.push(Number(value));
+    else if (flag === "--country") args.countries.push(value.trim().toUpperCase());
+    else if (flag === "--region") args.regions.push(value.trim().toUpperCase());
     else if (flag === "--price") args.price = Number(value);
   }
 
@@ -79,8 +83,6 @@ async function api(path) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
 
-  // An explicit --game must narrow the run to that game, even when only one
-  // was named.
   const onlyTheseGames = args.games.length > 0;
 
   if (!process.env.SHOP2TOPUP_API_KEY) {
@@ -89,7 +91,6 @@ async function main() {
 
   const localGames = catalog.getGames();
 
-  // "Blood Strike" and "blood_strike" should both find the local game.
   const wanted = args.games.length
     ? args.games
     : [...new Set(localGames.map((g) => g.name))];
@@ -103,7 +104,6 @@ async function main() {
   const categories = await api(`${API_BASE}/categories`);
   const products = await api(`${API_BASE}/subcategories`);
 
-  // category_id -> the products the provider sells under it.
   const productsByCategory = new Map();
 
   for (const product of products) {
@@ -131,6 +131,18 @@ async function main() {
   let added = 0;
   let skipped = 0;
 
+  const categoryFilters = args.categories.length
+    ? new Set(args.categories)
+    : null;
+
+  const countryFilters = args.countries.length
+    ? new Set(args.countries)
+    : null;
+
+  const regionFilters = args.regions.length
+    ? new Set(args.regions)
+    : null;
+
   for (const local of localGames) {
     if (
       onlyTheseGames &&
@@ -147,9 +159,26 @@ async function main() {
       continue;
     }
 
-    const filtered = args.categories.length
-      ? match.filter((c) => args.categories.includes(c.id))
-      : match;
+    const filtered = match.filter((c) => {
+      if (categoryFilters && !categoryFilters.has(Number(c.id))) return false;
+      if (countryFilters) {
+        const codes = new Set(
+          (c.country_ids || [])
+            .map((co) => String(co.code || "").trim().toUpperCase())
+            .filter(Boolean)
+        );
+        if (![...countryFilters].some((f) => codes.has(f))) return false;
+      }
+      if (regionFilters) {
+        const names = new Set(
+          (c.region_ids || [])
+            .map((r) => String(r.name || "").trim().toUpperCase())
+            .filter(Boolean)
+        );
+        if (![...regionFilters].some((f) => names.has(f))) return false;
+      }
+      return true;
+    });
 
     console.log(
       `\n${local.name} (${local.id}) -> ${match.length} provider categor${

@@ -175,8 +175,8 @@
         {
           "id": "weekly_lite",
           "name": "Weekly Lite",
-          "price": 0,
-          "paused": true,
+          "price": 150,
+          "paused": false,
           "note": "Provider USD 0.302679",
           "sub_category_id": 109,
           "requirements": []
@@ -184,8 +184,8 @@
         {
           "id": "monthly_membership",
           "name": "Monthly Membership",
-          "price": 0,
-          "paused": true,
+          "price": 2850,
+          "paused": false,
           "note": "Provider USD 8.626348",
           "sub_category_id": 111,
           "requirements": []

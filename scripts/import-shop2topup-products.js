@@ -24,16 +24,16 @@ const catalog = require("../catalog");
 |   node scripts/import-shop2topup-products.js --game="Free Fire" --game=free_fire
 |   node scripts/import-shop2topup-products.js --apply --price=0
 |
- | Flags:
- |   --apply         write the packages. Without it this only prints a plan.
- |   --game=NAME     a big_category_name from the provider, or a local game id.
- |                   Repeatable. Defaults to every game already in this shop.
- |   --category=ID   only this provider category id. Repeatable.
- |   --country=CODE  only categories serving this ISO country code. Repeatable.
- |   --region=NAME   only categories in this region name. Repeatable.
- |   --price=N       LKR price to give each package. Default 0.
- |   --live          add packages unpaused. Default is paused, so a package
- |                   with no price set cannot be ordered by mistake.
+| Flags:
+|   --apply         write the packages. Without it this only prints a plan.
+|   --game=NAME     a big_category_name from the provider, or a local game id.
+|                   Repeatable. Defaults to every game already in this shop.
+|   --category=ID   only this provider category id. Repeatable.
+|   --country=CODE  only categories serving this ISO country code. Repeatable.
+|   --region=NAME   only categories in this region name. Repeatable.
+|   --price=N       LKR price to give each package. Default 0.
+|   --live          add packages unpaused. Default is paused, so a package
+|                   with no price set cannot be ordered by mistake.
 |
 | Nothing here places an order. It only reads the provider's catalog.
 */
@@ -83,8 +83,6 @@ async function api(path) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
 
-  // An explicit --game must narrow the run to that game, even when only one
-  // was named.
   const onlyTheseGames = args.games.length > 0;
 
   if (!process.env.SHOP2TOPUP_API_KEY) {
@@ -93,7 +91,6 @@ async function main() {
 
   const localGames = catalog.getGames();
 
-  // "Blood Strike" and "blood_strike" should both find the local game.
   const wanted = args.games.length
     ? args.games
     : [...new Set(localGames.map((g) => g.name))];
@@ -107,7 +104,6 @@ async function main() {
   const categories = await api(`${API_BASE}/categories`);
   const products = await api(`${API_BASE}/subcategories`);
 
-  // category_id -> the products the provider sells under it.
   const productsByCategory = new Map();
 
   for (const product of products) {

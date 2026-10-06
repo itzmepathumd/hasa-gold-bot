@@ -10,20 +10,20 @@ const catalog = require("../catalog");
 | Copies a game's real product list out of the SHOP2TOPUP catalog and into
 | this shop's catalog, so every product has a sub_category_id and can be
 | ordered automatically.
-|
+
 | Where the game name comes from matters. The products endpoint
 | (/catalog/subcategories) has no game field at all, and product names are
 | not unique across games: "100 Diamonds" is a Free Fire product and a Mobile
 | Legends product and a PUBG product. Matching on names would mix them up and
 | charge a customer for the wrong game.
-|
+
 | So the game is read from /catalog/categories, where each category carries a
 | big_category_name, and only the categories under that game are imported.
-|
+
 |   node scripts/import-shop2topup-products.js
 |   node scripts/import-shop2topup-products.js --game="Free Fire" --game=free_fire
 |   node scripts/import-shop2topup-products.js --apply --price=0
-|
+
 | Flags:
 |   --apply         write the packages. Without it this only prints a plan.
 |   --game=NAME     a big_category_name from the provider, or a local game id.
@@ -34,7 +34,7 @@ const catalog = require("../catalog");
 |   --price=N       LKR price to give each package. Default 0.
 |   --live          add packages unpaused. Default is paused, so a package
 |                   with no price set cannot be ordered by mistake.
-|
+
 | Nothing here places an order. It only reads the provider's catalog.
 */
 
@@ -83,6 +83,8 @@ async function api(path) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
 
+  // An explicit --game must narrow the run to that game, even when only one
+  // was named.
   const onlyTheseGames = args.games.length > 0;
 
   if (!process.env.SHOP2TOPUP_API_KEY) {
@@ -91,6 +93,7 @@ async function main() {
 
   const localGames = catalog.getGames();
 
+  // "Blood Strike" and "blood_strike" should both find the local game.
   const wanted = args.games.length
     ? args.games
     : [...new Set(localGames.map((g) => g.name))];
@@ -104,6 +107,7 @@ async function main() {
   const categories = await api(`${API_BASE}/categories`);
   const products = await api(`${API_BASE}/subcategories`);
 
+  // category_id -> the products the provider sells under it.
   const productsByCategory = new Map();
 
   for (const product of products) {

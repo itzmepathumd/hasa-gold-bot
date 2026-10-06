@@ -12,6 +12,27 @@
 
 const APPROVED = "approved";
 
+/*
+| A store day is a Colombo day. Timestamps are stored as UTC ISO strings,
+| so slicing one to "2026-10-04" gives the UTC date, which is a different
+| day for anything after 18:30 UTC. Reading the UTC date off a timestamp and
+| comparing it with a locally built midnight puts orders in the wrong bucket:
+| a sale at 22:00 Colombo time lands on the previous day, and every chart
+| heading is a day early.
+|
+| Both sides of that comparison now go through this function, so the bucket
+| an order is counted into is the day the shop actually saw the sale. It
+| formats the local calendar fields rather than shifting by a fixed offset,
+| which keeps it correct without assuming anything about daylight saving.
+*/
+function localDayKey(date) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+
+  return `${y}-${m}-${d}`;
+}
+
 function money(value) {
   return Number(value || 0).toLocaleString("en-US");
 }
@@ -157,7 +178,7 @@ function dailyRevenue(orders, days = 7) {
 
   for (let i = days - 1; i >= 0; i--) {
     const day = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i);
-    const key = day.toISOString().slice(0, 10);
+    const key = localDayKey(day);
 
     out.push({ date: key, label: day.toLocaleDateString("en-US", { weekday: "short", day: "numeric" }), orders: 0, revenue: 0 });
   }
@@ -167,8 +188,7 @@ function dailyRevenue(orders, days = 7) {
   for (const order of orders || []) {
     if (order.status !== APPROVED || !order.approvedAt) continue;
 
-    const dayKey = String(order.approvedAt).slice(0, 10);
-    const bucket = index.get(dayKey);
+    const bucket = index.get(localDayKey(new Date(order.approvedAt)));
 
     if (bucket) {
       bucket.orders += 1;

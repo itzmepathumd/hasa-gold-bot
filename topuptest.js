@@ -5,12 +5,17 @@ const path = require("path");
 |--------------------------------------------------------------------------
 | TOP-UP TEST
 |--------------------------------------------------------------------------
-| Fulfilment moves real money, so these checks are all about the ways a
-| customer could be harmed:
+| Fulfilment moves real money, and the provider charges the wallet the moment
+| an order is created, so these checks are all about the ways a customer
+| could be harmed:
 |
-|   - a double-tapped Approve must not send two supplier commands,
-|   - a request whose outcome is unknown must never be resent,
-|   - an unmapped package must never be sent at all,
+|   - a double-tapped Approve must not place two orders,
+|   - the idempotency key must be stored BEFORE the provider is called, so a
+|     crash mid-call leaves something that can be read back,
+|   - a retry must reuse that key, so it cannot buy a second top-up,
+|   - a request whose outcome is unknown must never be resent under a new
+|     key, because the first one may already have been paid for,
+|   - a package with no provider product must never be ordered,
 |   - concurrent writes must not lose orders,
 |   - a corrupt orders.json must block writes rather than silently
 |     overwrite every order with nothing.
@@ -53,17 +58,13 @@ function restoreOrders() {
   fs.writeFileSync(ORDERS_FILE, backup);
 }
 
-function sentMessages() {
-  return [];
-}
-
 function baseOrder(overrides = {}) {
   return {
     id: "HG-TEST-0001",
     userId: 100,
     username: "tester",
     firstName: "Tester",
-    playerId: "11927288867",
+    playerId: "8595647532",
     playerName: "Pro",
     playerRegion: "Asia",
     gameId: "free_fire",
@@ -71,6 +72,7 @@ function baseOrder(overrides = {}) {
     idLabel: "Player ID",
     productKey: "weekly",
     productName: "📅 Weekly",
+    subCategoryId: 110,
     price: 590,
     status: "pending_approval",
     paymentProof: "FILEID",
@@ -80,12 +82,14 @@ function baseOrder(overrides = {}) {
     rejectedAt: null,
     topupStatus: null,
     topupAttempts: 0,
-    supplierTransactionId: null,
-    supplierMessageId: null,
+    providerOrderId: null,
+    providerTransactionId: null,
+    providerStatus: null,
+    providerRaw: null,
+    topupRetryArmed: false,
     topupStartedAt: null,
     topupCompletedAt: null,
     topupError: null,
-    supplierRawReply: null,
     ...overrides,
   };
 }
@@ -99,11 +103,7 @@ const telegramModule = require(path.join(telegramPath, "telegram.js"));
 const Telegram =
   telegramModule.Telegram || telegramModule.default;
 
-const sent = [];
-const calls = [];
-
 async function stub(...args) {
-  calls.push(args);
   return { message_id: 1 };
 }
 
@@ -133,22 +133,48 @@ check(
   "index.js exports what the tests need",
   typeof botModule.processAutoTopup === "function" &&
     typeof botModule.runStartupRecovery === "function" &&
-    typeof botModule.supplierAdapter === "object"
+    typeof botModule.resolveTopupOrder === "function" &&
+    typeof botModule.reviewingOrders === "function" &&
+    typeof botModule.topupProvider === "object"
 );
 
-// The supplier adapter is replaced so no command can leave the machine.
-const commands = [];
+/*
+| The provider is replaced so no order can leave the machine. What the stub
+| records is what matters here: the key that was sent, and what the order
+| record held at the moment the provider was called.
+*/
+const placed = [];
+let minted = 0;
 
-function stubSupplier(reply) {
-  botModule.supplierAdapter.isInitialized = true;
-  botModule.supplierAdapter.testMode = false;
-  botModule.supplierAdapter.sendTopup = async (order) => {
-    commands.push(
-      botModule.supplierAdapter.buildCommand(order).command
-    );
+function stubProvider(reply, lookup) {
+  const provider = botModule.topupProvider;
 
-    // A function computes the reply per order; an object is returned as
-    // is; no argument means a straightforward success.
+  provider.isInitialized = true;
+  provider.testMode = false;
+
+  // Deterministic keys, so a test can prove one key was minted once.
+  provider.newOrderId = () => `01910000-0000-4000-8000-${String(
+    ++minted
+  ).padStart(12, "0")}`;
+
+  provider.canFulfill = (order) =>
+    Boolean(order.subCategoryId) &&
+    Boolean(String(order.playerId || "").trim());
+
+  provider.sendTopup = async (order) => {
+    const stored = botModule
+      .getOrders()
+      .find((o) => o.id === order.id);
+
+    placed.push({
+      orderId: order.providerOrderId,
+      storedId: stored?.providerOrderId,
+      subCategoryId: order.subCategoryId,
+      playerId: order.playerId,
+    });
+
+    // A function computes the answer per order; an object is returned as is;
+    // no argument means a straightforward delivery.
     if (typeof reply === "function") {
       return reply(order);
     }
@@ -160,12 +186,21 @@ function stubSupplier(reply) {
     return {
       success: true,
       status: "success",
-      statusDetail: "completed",
+      statusDetail: "provider_completed",
+      orderId: order.providerOrderId,
       transactionId: "TXN-1",
-      messageId: 1,
-      rawResponse: "✅ Top-up successful. Transaction ID: TXN-1",
+      providerStatus: "completed",
+      raw: '{"order":{"status":"completed"}}',
     };
   };
+
+  provider.checkTopupStatus = async (order) =>
+    typeof lookup === "function"
+      ? lookup(order)
+      : lookup || {
+          status: "unknown",
+          statusDetail: "provider_unreachable",
+        };
 }
 
 (async () => {
@@ -177,8 +212,9 @@ function stubSupplier(reply) {
     console.log("\n== a successful top-up completes ==");
 
     saveOrdersFile([baseOrder()]);
-    commands.length = 0;
-    stubSupplier();
+    placed.length = 0;
+    minted = 0;
+    stubProvider();
 
     await botModule.processAutoTopup("HG-TEST-0001");
 
@@ -197,28 +233,61 @@ function stubSupplier(reply) {
       order.status
     );
     check(
-      "exactly one supplier command was sent",
-      commands.length === 1,
-      JSON.stringify(commands)
+      "exactly one provider order was placed",
+      placed.length === 1,
+      JSON.stringify(placed)
     );
     check(
-      "the confirmed command shape was used",
-      commands[0] === "/id 11927288867 WEEKLY",
-      commands[0]
+      "the key was stored before the provider was called",
+      placed[0].storedId === placed[0].orderId &&
+        Boolean(placed[0].storedId),
+      JSON.stringify(placed[0])
     );
     check(
-      "the transaction id was recorded",
-      order.supplierTransactionId === "TXN-1",
-      String(order.supplierTransactionId)
+      "the stored key is the order's own",
+      order.providerOrderId === placed[0].orderId,
+      String(order.providerOrderId)
+    );
+
+    check(
+      "the order's own product id was sent",
+      placed[0].subCategoryId === 110,
+      String(placed[0].subCategoryId)
+    );
+    check(
+      "the player's id was sent",
+      placed[0].playerId === "8595647532",
+      placed[0].playerId
+    );
+    check(
+      "the provider reference was recorded",
+      order.providerTransactionId === "TXN-1",
+      String(order.providerTransactionId)
     );
     check("one attempt was used", order.topupAttempts === 1);
-    check("the raw reply was kept", !!order.supplierRawReply);
+    check("the raw answer was kept", !!order.providerRaw);
+    check(
+      "the provider status was kept",
+      order.providerStatus === "completed",
+      String(order.providerStatus)
+    );
+    check(
+      "a delivered order is not in the review queue",
+      order.providerFailed === false &&
+        !botModule
+          .reviewingOrders()
+          .some((o) => o.id === "HG-TEST-0001"),
+      String(order.providerFailed)
+    );
 
-    console.log("\n== approving twice sends one command ==");
+    console.log("\n== approving twice places one order ==");
 
-    saveOrdersFile([baseOrder({ status: "approved", topupStatus: "ready_for_topup" })]);
-    commands.length = 0;
-    stubSupplier();
+    saveOrdersFile([
+      baseOrder({ status: "approved", topupStatus: "ready_for_topup" }),
+    ]);
+    placed.length = 0;
+    minted = 0;
+    stubProvider();
 
     await Promise.all([
       botModule.processAutoTopup("HG-TEST-0001"),
@@ -231,10 +300,11 @@ function stubSupplier(reply) {
       .find((o) => o.id === "HG-TEST-0001");
 
     check(
-      "three concurrent calls still send one command",
-      commands.length === 1,
-      String(commands.length)
+      "three concurrent calls still place one order",
+      placed.length === 1,
+      String(placed.length)
     );
+    check("only one key was minted", minted === 1, String(minted));
     check("only one attempt was recorded", order.topupAttempts === 1);
     check(
       "the order completed",
@@ -242,31 +312,33 @@ function stubSupplier(reply) {
       order.topupStatus
     );
 
-    console.log("\n== a completed order is never re-sent ==");
+    console.log("\n== a completed order is never re-ordered ==");
 
-    commands.length = 0;
+    placed.length = 0;
 
     await botModule.processAutoTopup("HG-TEST-0001");
 
     check(
-      "nothing was sent again",
-      commands.length === 0,
-      String(commands.length)
+      "nothing was placed again",
+      placed.length === 0,
+      String(placed.length)
     );
 
-    console.log("\n== an unknown outcome is not resent ==");
+    console.log("\n== a retry reuses the stored key ==");
 
-    // The order was interrupted after the request went out.
+    // What an admin retry produces: parked order, existing provider id.
     saveOrdersFile([
       baseOrder({
-        status: "topup_processing",
-        topupStatus: "topup_processing",
+        status: "needs_review",
+        topupStatus: "needs_review",
         topupAttempts: 1,
-        supplierMessageId: 555,
+        providerOrderId: "0191aaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        topupRetryArmed: true,
       }),
     ]);
-    commands.length = 0;
-    stubSupplier();
+    placed.length = 0;
+    minted = 0;
+    stubProvider();
 
     await botModule.processAutoTopup("HG-TEST-0001");
 
@@ -275,9 +347,74 @@ function stubSupplier(reply) {
       .find((o) => o.id === "HG-TEST-0001");
 
     check(
-      "no second command was sent",
-      commands.length === 0,
-      String(commands.length)
+      "the retry was placed",
+      placed.length === 1,
+      JSON.stringify(placed)
+    );
+    check(
+      "it reused the stored key, so nothing is charged twice",
+      placed[0].orderId === "0191aaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      JSON.stringify(placed[0])
+    );
+    check("no second key was minted", minted === 0, String(minted));
+
+    console.log("\n== a parked order is never re-armed by itself ==");
+
+    saveOrdersFile([
+      baseOrder({
+        status: "needs_review",
+        topupStatus: "needs_review",
+        topupAttempts: 1,
+        providerOrderId: "0191aaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      }),
+    ]);
+    placed.length = 0;
+    minted = 0;
+    stubProvider();
+
+    await botModule.processAutoTopup("HG-TEST-0001");
+
+    check(
+      "nothing was placed",
+      placed.length === 0,
+      String(placed.length)
+    );
+
+    order = botModule
+      .getOrders()
+      .find((o) => o.id === "HG-TEST-0001");
+
+    check(
+      "it stays parked for a human",
+      order.topupStatus === "needs_review",
+      order.topupStatus
+    );
+
+    console.log("\n== an unknown outcome is not resent ==");
+
+    // The process died after the order was placed.
+    saveOrdersFile([
+      baseOrder({
+        status: "topup_processing",
+        topupStatus: "topup_processing",
+        topupAttempts: 1,
+        providerOrderId: "0191ffff-ffff-4fff-8fff-ffffffffffff",
+      }),
+    ]);
+    placed.length = 0;
+    minted = 0;
+    stubProvider({}, { status: "processing", statusDetail: "provider_pending" });
+
+    await botModule.processAutoTopup("HG-TEST-0001");
+
+    order = botModule
+      .getOrders()
+      .find((o) => o.id === "HG-TEST-0001");
+
+    check(
+      "no second order was placed",
+      placed.length === 0,
+      String(placed.length)
     );
     check(
       "attempts were left alone",
@@ -289,17 +426,98 @@ function stubSupplier(reply) {
       order.topupStatus === "needs_review",
       order.topupStatus
     );
+    check(
+      "a still-running order keeps its retry button",
+      /review_retry_/.test(
+        JSON.stringify(
+          botModule.reviewOrderMenu(order, { canRetry: true })
+        )
+      ),
+      JSON.stringify(
+        botModule.reviewOrderMenu(order, { canRetry: true })
+      ).slice(0, 200)
+    );
+    check(
+      "it is not treated as a provider failure",
+      !order.providerFailed,
+      String(order.providerFailed)
+    );
 
-    console.log("\n== an unrecognised reply is not success ==");
+    console.log("\n== a still-running order settles when it finishes ==");
 
-    saveOrdersFile([baseOrder({ status: "approved", topupStatus: "ready_for_topup" })]);
-    stubSupplier({
+    saveOrdersFile([
+      baseOrder({
+        status: "needs_review",
+        topupStatus: "needs_review",
+        topupAttempts: 1,
+        providerOrderId: "0191bbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      }),
+    ]);
+    placed.length = 0;
+    stubProvider(
+      { success: false, status: "processing", statusDetail: "provider_pending" },
+      { status: "success", statusDetail: "provider_completed" }
+    );
+
+    await botModule.resolveTopupOrder("HG-TEST-0001");
+
+    order = botModule
+      .getOrders()
+      .find((o) => o.id === "HG-TEST-0001");
+
+    check(
+      "the completed lookup completes the order",
+      order.topupStatus === "topup_completed",
+      order.topupStatus
+    );
+    check(
+      "no new order was placed while resolving",
+      placed.length === 0,
+      String(placed.length)
+    );
+
+    console.log("\n== a provider failure reported by a lookup is terminal ==");
+
+    saveOrdersFile([
+      baseOrder({
+        status: "needs_review",
+        topupStatus: "needs_review",
+        topupAttempts: 1,
+        providerOrderId: "0191cccc-cccc-4ccc-8ccc-cccccccccccc",
+      }),
+    ]);
+    stubProvider(
+      undefined,
+      { status: "failed", statusDetail: "provider_failed" }
+    );
+
+    await botModule.resolveTopupOrder("HG-TEST-0001");
+
+    order = botModule
+      .getOrders()
+      .find((o) => o.id === "HG-TEST-0001");
+
+    check(
+      "marked failed, not delivered",
+      order.topupStatus === "topup_failed",
+      order.topupStatus
+    );
+
+    console.log("\n== a pending answer is not a delivery ==");
+
+    saveOrdersFile([
+      baseOrder({ status: "approved", topupStatus: "ready_for_topup" }),
+    ]);
+    placed.length = 0;
+    minted = 0;
+    stubProvider({
       success: false,
-      status: "unknown",
-      statusDetail: "unrecognised_reply",
+      status: "processing",
+      statusDetail: "provider_pending",
+      orderId: "0191dddd-dddd-4ddd-8ddd-dddddddddddd",
       transactionId: null,
-      messageId: 1,
-      rawResponse: "hmm",
+      providerStatus: "pending",
+      raw: '{"order":{"status":"pending"}}',
     });
 
     await botModule.processAutoTopup("HG-TEST-0001");
@@ -313,17 +531,25 @@ function stubSupplier(reply) {
       order.topupStatus === "needs_review",
       order.topupStatus
     );
+    check(
+      "the wallet was charged, so it is read back later",
+      order.providerOrderId === "0191dddd-dddd-4ddd-8ddd-dddddddddddd",
+      String(order.providerOrderId)
+    );
 
-    console.log("\n== a timeout is not success ==");
+    console.log("\n== an unreachable provider is not a failure ==");
 
-    saveOrdersFile([baseOrder({ status: "approved", topupStatus: "ready_for_topup" })]);
-    stubSupplier({
+    saveOrdersFile([
+      baseOrder({ status: "approved", topupStatus: "ready_for_topup" }),
+    ]);
+    placed.length = 0;
+    stubProvider({
       success: false,
       status: "unknown",
-      statusDetail: "no_reply_from_supplier",
+      statusDetail: "provider_unreachable",
+      orderId: null,
       transactionId: null,
-      messageId: null,
-      rawResponse: null,
+      raw: null,
     });
 
     await botModule.processAutoTopup("HG-TEST-0001");
@@ -337,17 +563,24 @@ function stubSupplier(reply) {
       order.topupStatus === "needs_review",
       order.topupStatus
     );
+    check(
+      "not marked failed either",
+      order.topupStatus !== "topup_failed"
+    );
 
-    console.log("\n== a supplier failure is terminal ==");
+    console.log("\n== a provider refusal is terminal ==");
 
-    saveOrdersFile([baseOrder({ status: "approved", topupStatus: "ready_for_topup" })]);
-    stubSupplier({
+    saveOrdersFile([
+      baseOrder({ status: "approved", topupStatus: "ready_for_topup" }),
+    ]);
+    stubProvider({
       success: false,
       status: "failed",
       statusDetail: "insufficient_balance",
+      orderId: "0191eeee-eeee-4eee-8eee-eeeeeeeeeeee",
       transactionId: null,
-      messageId: 1,
-      rawResponse: "Insufficient balance",
+      providerStatus: "failed",
+      raw: '{"error":{"code":"INSUFFICIENT_BALANCE"}}',
     });
 
     await botModule.processAutoTopup("HG-TEST-0001");
@@ -366,8 +599,31 @@ function stubSupplier(reply) {
       order.topupError === "insufficient_balance",
       order.topupError
     );
+    check(
+      "it is marked as a provider failure",
+      order.providerFailed === true,
+      String(order.providerFailed)
+    );
+    check(
+      "it lands in the review queue",
+      botModule
+        .reviewingOrders()
+        .some((o) => o.id === "HG-TEST-0001"),
+      JSON.stringify(
+        botModule.reviewingOrders().map((o) => o.id)
+      )
+    );
+    check(
+      "the review screen offers no retry, since the provider would refuse it again",
+      !/review_retry_/.test(
+        JSON.stringify(botModule.reviewOrderMenu(order, { canRetry: true }))
+      ),
+      JSON.stringify(
+        botModule.reviewOrderMenu(order, { canRetry: true })
+      ).slice(0, 200)
+    );
 
-    console.log("\n== an unmapped package is never sent ==");
+    console.log("\n== an unmapped package is never ordered ==");
 
     saveOrdersFile([
       baseOrder({
@@ -375,12 +631,14 @@ function stubSupplier(reply) {
         gameName: "Blood Strike",
         productKey: "gold500",
         productName: "💎 500 Gold",
+        subCategoryId: null,
         status: "approved",
         topupStatus: "ready_for_topup",
       }),
     ]);
-    commands.length = 0;
-    stubSupplier();
+    placed.length = 0;
+    minted = 0;
+    stubProvider();
 
     await botModule.processAutoTopup("HG-TEST-0001");
 
@@ -389,9 +647,14 @@ function stubSupplier(reply) {
       .find((o) => o.id === "HG-TEST-0001");
 
     check(
-      "nothing was sent to the supplier",
-      commands.length === 0,
-      JSON.stringify(commands)
+      "nothing was ordered",
+      placed.length === 0,
+      JSON.stringify(placed)
+    );
+    check(
+      "no key was minted for it",
+      minted === 0,
+      String(minted)
     );
     check(
       "it is parked for a human",
@@ -408,8 +671,8 @@ function stubSupplier(reply) {
         topupAttempts: 3,
       }),
     ]);
-    commands.length = 0;
-    stubSupplier();
+    placed.length = 0;
+    stubProvider();
 
     await botModule.processAutoTopup("HG-TEST-0001");
 
@@ -418,9 +681,9 @@ function stubSupplier(reply) {
       .find((o) => o.id === "HG-TEST-0001");
 
     check(
-      "nothing more was sent",
-      commands.length === 0,
-      String(commands.length)
+      "nothing more was placed",
+      placed.length === 0,
+      String(placed.length)
     );
     check(
       "failed rather than silently retried",
@@ -439,8 +702,9 @@ function stubSupplier(reply) {
     );
 
     saveOrdersFile(many);
-    commands.length = 0;
-    stubSupplier();
+    placed.length = 0;
+    minted = 0;
+    stubProvider();
 
     await Promise.all(
       many.map((o) => botModule.processAutoTopup(o.id))
@@ -474,9 +738,18 @@ function stubSupplier(reply) {
         .join(",")
     );
     check(
-      "each sent exactly one command",
-      commands.length === 12,
-      String(commands.length)
+      "each placed exactly one order",
+      placed.length === 12,
+      String(placed.length)
+    );
+    check(
+      "each order got its own key",
+      new Set(placed.map((p) => p.orderId)).size === 12,
+      String(new Set(placed.map((p) => p.orderId)).size)
+    );
+    check(
+      "every key was stored before it was used",
+      placed.every((p) => p.orderId && p.orderId === p.storedId)
     );
 
     console.log("\n== a corrupt store blocks writes ==");
@@ -522,7 +795,7 @@ function stubSupplier(reply) {
         status: "topup_processing",
         topupStatus: "topup_processing",
         topupAttempts: 1,
-        supplierMessageId: 777,
+        providerOrderId: "01911111-1111-4111-8111-111111111111",
       }),
       baseOrder({
         id: "HG-READY",
@@ -534,10 +807,12 @@ function stubSupplier(reply) {
         status: "topup_completed",
         topupStatus: "topup_completed",
         topupAttempts: 1,
+        providerOrderId: "01912222-2222-4222-8222-222222222222",
       }),
     ]);
-    commands.length = 0;
-    stubSupplier();
+    placed.length = 0;
+    minted = 0;
+    stubProvider();
 
     await botModule.runStartupRecovery();
 
@@ -547,14 +822,19 @@ function stubSupplier(reply) {
     );
 
     check(
-      "nothing was resent on boot",
-      commands.length === 0,
-      JSON.stringify(commands)
+      "nothing was re-ordered on boot",
+      placed.length === 0,
+      JSON.stringify(placed)
     );
     check(
       "the in-flight order was parked",
       byId["HG-INFLIGHT"].topupStatus === "needs_review",
       byId["HG-INFLIGHT"].topupStatus
+    );
+    check(
+      "its key was kept so it can still be read",
+      byId["HG-INFLIGHT"].providerOrderId ===
+        "01911111-1111-4111-8111-111111111111"
     );
     check(
       "the ready order was parked",

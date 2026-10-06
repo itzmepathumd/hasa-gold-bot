@@ -22,7 +22,7 @@
 |
 |   A fast answer. Telegram retries anything it does not get a 200 for, so the
 |   update is acknowledged immediately and handled afterwards. Holding the
-|   response open for a slow supplier call would make Telegram deliver the
+|   response open for a slow provider call would make Telegram deliver the
 |   same update several times.
 */
 
@@ -188,7 +188,7 @@ function createHandler(bot, options = {}) {
     }
 
     // Answer first. Telegram redelivers on a slow response, and handling a
-    // supplier top-up can take a minute.
+    // provider top-up can take a minute.
     res.writeHead(200);
     res.end();
 
@@ -235,7 +235,7 @@ async function listen(bot, options = {}) {
 
 /**
  * Stop listening without killing the process, so shutdown can finish the
- * supplier and database work first.
+ * provider and database work first.
  */
 async function close(server) {
   if (!server) {

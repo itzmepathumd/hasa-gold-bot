@@ -350,6 +350,34 @@ class FakeFirestore {
 
             staged.set(`${ref.collectionName}/${ref.id}`, clone(data));
           },
+          /**
+           * Fails when the document already exists, staged or
+           * committed, which is how the wallet ledger keeps a
+           * replayed settlement from being applied twice.
+           */
+          create: (ref, data) => {
+            const key = `${ref.collectionName}/${ref.id}`;
+
+            if (staged.has(key) || this.data.has(key)) {
+              const error = new Error(
+                `FakeFirestore: ${ref.path} already exists`
+              );
+
+              error.code = 6;
+
+              throw error;
+            }
+
+            for (const value of Object.values(data)) {
+              if (value === undefined) {
+                throw new Error(
+                  "FakeFirestore: transaction create() was given an undefined value"
+                );
+              }
+            }
+
+            staged.set(key, clone(data));
+          },
           delete: (ref) => {
             staged.delete(`${ref.collectionName}/${ref.id}`);
           },

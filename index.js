@@ -5087,6 +5087,12 @@ function adminMenu() {
     ],
     [
       Markup.button.callback(
+        "📋  API LOGS",
+        "admin_api_logs"
+      ),
+    ],
+    [
+      Markup.button.callback(
         "🛠️  MANAGE STORE",
         "store_home"
       ),
@@ -6895,6 +6901,68 @@ bot.action("admin_home", async (ctx) => {
       ...adminMenu(),
     }
   );
+});
+
+/*
+|--------------------------------------------------------------------------
+| API LOGS
+|--------------------------------------------------------------------------
+*/
+
+bot.action("admin_api_logs", async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+
+  if (ctx.from.id !== ADMIN_ID) {
+    return ctx.reply("⛔ Admin access only.");
+  }
+
+  const apilog = require("./src/apilog");
+  const logs = apilog.recent(20);
+  const now = Date.now();
+
+  const lines = logs.map((e) => {
+    const when = new Date(e.at).toLocaleString("en-GB", {
+      timeZone: "Asia/Colombo",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+
+    const status = e.error
+      ? `❌ ${e.error}`
+      : e.statusCode
+        ? `${e.statusCode}`
+        : "pending";
+
+    const duration = e.durationMs != null ? `${e.durationMs}ms` : "…";
+
+    return `${when} ${e.method} ${e.path}\n   ${status} · ${duration}`;
+  });
+
+  const message =
+    `📋 *API LOGS*\n\n` +
+    `━━━━━━━━━━━━━━━━━━\n\n` +
+    (lines.length ? lines.join("\n\n") : "_No API calls yet_") +
+    `\n\n━━━━━━━━━━━━━━━━━━\n` +
+    `Showing last ${Math.min(logs.length, 20)} of ${apilog.MAX_ENTRIES} max.`;
+
+  await ctx.editMessageText(message, {
+    parse_mode: "Markdown",
+    ...Markup.inlineKeyboard([
+      [
+        Markup.button.callback(
+          "🔄  REFRESH",
+          "admin_api_logs"
+        ),
+      ],
+      [
+        Markup.button.callback(
+          "🔙  ADMIN PANEL",
+          "admin_home"
+        ),
+      ],
+    ]),
+  });
 });
 
 /*

@@ -198,6 +198,7 @@ function walletScreenText(userId) {
 
 function walletMenu() {
   return Markup.inlineKeyboard([
+    [Markup.button.callback("⚡  EZ CASH AUTO VERIFY", "recharge_ez_cash_auto")],
     [Markup.button.callback("➕  RECHARGE", "recharge")],
     [Markup.button.callback("📜  HISTORY", "wallet_history")],
   ]);

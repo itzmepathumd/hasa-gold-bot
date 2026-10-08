@@ -1046,24 +1046,6 @@ bot.action(/^recharge_(ez_cash|bank_transfer)$/, async (ctx) => {
   });
 });
 
-bot.action("recharge_ez_cash_auto", async (ctx) => {
-  await ctx.answerCbQuery().catch(() => {});
-
-  const flow = ensureSession(ctx).walletFlow;
-
-  if (!flow || flow.step !== "method") {
-    return ctx.reply("❌ Recharge flow expired. Use /recharge to start again.");
-  }
-
-  flow.method = "ez_cash_auto";
-  flow.step = "rn";
-
-  await ctx.editMessageText(wallet.rechargeAutoVerifyText(flow.amount), {
-    parse_mode: "Markdown",
-    ...wallet.rechargeAutoVerifyMenu(),
-  });
-});
-
 bot.action("recharge_cancel", async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
 
@@ -1074,6 +1056,31 @@ bot.action("recharge_cancel", async (ctx) => {
       [Markup.button.callback("🔙  BACK TO WALLET", "wallet")],
     ]),
   });
+});
+
+/*
+|--------------------------------------------------------------------------
+| EZ CASH AUTO VERIFY (direct from wallet menu)
+|--------------------------------------------------------------------------
+*/
+bot.action("recharge_ez_cash_auto", async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+
+  // Clear any existing flow and start auto-verify
+  ensureSession(ctx).walletFlow = { step: "rn" };
+
+  await ctx.editMessageText(
+    `⚡ *EZ CASH AUTO VERIFY*\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `Send the *14-digit RN number* from your\neZ Cash payment SMS.\n\n` +
+      `We will verify it and credit the exact\namount automatically.`,
+    {
+      parse_mode: "Markdown",
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback("❌  CANCEL", "recharge_cancel")],
+      ]),
+    }
+  );
 });
 
 /*
@@ -1217,7 +1224,7 @@ async function handleWalletFlow(ctx, text) {
     if (verification.status === "credited") {
       const result = await wallet.requestRecharge(
         ctx.from.id,
-        flow.amount,
+        verification.amount,
         "ez_cash_auto",
         `auto_verified:${verification.depositId}`
       );
@@ -1269,7 +1276,7 @@ async function handleWalletFlow(ctx, text) {
     if (verification.status === "pending") {
       const result = await wallet.requestRecharge(
         ctx.from.id,
-        flow.amount,
+        wallet.MIN_RECHARGE,
         "ez_cash_auto",
         `pending_verify:${verification.depositId}`
       );

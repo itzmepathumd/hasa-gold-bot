@@ -1046,6 +1046,24 @@ bot.action(/^recharge_(ez_cash|bank_transfer)$/, async (ctx) => {
   });
 });
 
+bot.action("recharge_ez_cash_auto", async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+
+  const flow = ensureSession(ctx).walletFlow;
+
+  if (!flow || flow.step !== "method") {
+    return ctx.reply("❌ Recharge flow expired. Use /recharge to start again.");
+  }
+
+  flow.method = "ez_cash_auto";
+  flow.step = "rn";
+
+  await ctx.editMessageText(wallet.rechargeAutoVerifyText(flow.amount), {
+    parse_mode: "Markdown",
+    ...wallet.rechargeAutoVerifyMenu(),
+  });
+});
+
 bot.action("recharge_cancel", async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
 
@@ -1109,6 +1127,151 @@ async function handleWalletFlow(ctx, text) {
       parse_mode: "Markdown",
       ...wallet.rechargeConfirmMenu(),
     });
+  }
+
+  }
+
+  if (flow.step === "rn") {
+    const rn = String(text || "").replace(/\s+/g, "");
+
+    if (!/^\d{14}$/.test(rn)) {
+      return ctx.reply(
+        `❌ *Invalid RN number*\n\n` +
+          `━━━━━━━━━━━━━━━━━━\n\n` +
+          `Send the *14-digit RN* from your\neZ Cash payment SMS.\n\n` +
+          `Example: 20261007123456`,
+        {
+          parse_mode: "Markdown",
+          ...cancelFlowButton(),
+        }
+      );
+    }
+
+    await ctx.reply(
+      `⏳ *Verifying payment...*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `Please wait while we verify your\neZ Cash RN: ${rn}`,
+      {
+        parse_mode: "Markdown",
+        ...cancelFlowButton(),
+      }
+    );
+
+    const verification = await nexaura.verifyEzCashDeposit(rn);
+
+    if (!verification.ok) {
+      return ctx.reply(
+        `❌ *Verification failed*\n\n` +
+          `━━━━━━━━━━━━━━━━━━\n\n` +
+          `${verification.error}\n\n` +
+          `Please check the RN and try again, or use /recharge.`,
+        {
+          parse_mode: "Markdown",
+          ...wallet.walletMenu(),
+        }
+      );
+    }
+
+    if (verification.status === "credited") {
+      const result = await wallet.requestRecharge(
+        ctx.from.id,
+        flow.amount,
+        "ez_cash_auto",
+        `auto_verified:${verification.depositId}`
+      );
+
+      if (!result.ok) {
+        return ctx.reply(
+          `❌ *Recharge failed*\n\n` +
+            `━━━━━━━━━━━━━━━━━━\n\n` +
+            `${result.error}`,
+          {
+            parse_mode: "Markdown",
+            ...wallet.walletMenu(),
+          }
+        );
+      }
+
+      const approveResult = await wallet.approveRecharge(result.requestId, 0);
+
+      if (!approveResult.ok) {
+        return ctx.reply(
+          `⚠️ *Deposit verified but wallet credit failed*\n\n` +
+            `━━━━━━━━━━━━━━━━━━\n\n` +
+            `Please contact support with your RN: ${rn}\n\n` +
+            `Deposit ID: ${verification.depositId}`,
+          {
+            parse_mode: "Markdown",
+            ...wallet.walletMenu(),
+          }
+        );
+      }
+
+      ensureSession(ctx).walletFlow = null;
+
+      return ctx.reply(
+        `✅ *PAYMENT VERIFIED & CREDITED*\n\n` +
+          `━━━━━━━━━━━━━━━━━━\n\n` +
+          `💵 Amount: LKR ${wallet.formatLKR(verification.amount)}\n` +
+          `🔢 RN: ${rn}\n` +
+          `🆔 Deposit: ${verification.depositId}\n\n` +
+          `💰 New balance: LKR ${wallet.formatLKR(approveResult.balance)}\n\n` +
+          `Your wallet has been credited automatically.`,
+        {
+          parse_mode: "Markdown",
+          ...wallet.walletMenu(),
+        }
+      );
+    }
+
+    if (verification.status === "pending") {
+      const result = await wallet.requestRecharge(
+        ctx.from.id,
+        flow.amount,
+        "ez_cash_auto",
+        `pending_verify:${verification.depositId}`
+      );
+
+      if (!result.ok) {
+        return ctx.reply(
+          `❌ *Recharge request failed*\n\n` +
+            `━━━━━━━━━━━━━━━━━━\n\n` +
+            `${result.error}`,
+          {
+            parse_mode: "Markdown",
+            ...wallet.walletMenu(),
+          }
+        );
+      }
+
+      ensureSession(ctx).walletFlow = null;
+
+      return ctx.reply(
+        `⏳ *PAYMENT PENDING*\n\n` +
+          `━━━━━━━━━━━━━━━━━━\n\n` +
+          `Your payment is being verified.\n` +
+          `This may take a few minutes due to\nSMS delays.\n\n` +
+          `🔢 RN: ${rn}\n` +
+          `🆔 Deposit: ${verification.depositId}\n\n` +
+          `We will credit your wallet automatically\nonce verified.\n\n` +
+          `Use /wallet to check your balance.`,
+        {
+          parse_mode: "Markdown",
+          ...wallet.walletMenu(),
+        }
+      );
+    }
+
+    return ctx.reply(
+      `❌ *Unexpected verification status*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `Status: ${verification.status}\n\n` +
+        `Please contact support.`,
+      {
+        parse_mode: "Markdown",
+        ...wallet.walletMenu(),
+      }
+    );
   }
 
   if (flow.step === "proof") {

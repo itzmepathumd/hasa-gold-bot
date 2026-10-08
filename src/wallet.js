@@ -18,6 +18,7 @@
 
 const store = require("./database/wallets");
 const { getDb } = require("./database/firestore");
+const nexaura = require("./database/nexaura");
 
 const MIN_RECHARGE = 100;
 const MAX_SINGLE_RECHARGE = 50000;
@@ -32,6 +33,7 @@ const Markup = {
 
 const METHODS = {
   ez_cash: { label: "EZ Cash", emoji: "💳" },
+  ez_cash_auto: { label: "EZ Cash Auto Verify", emoji: "⚡" },
   bank_transfer: { label: "Bank Transfer", emoji: "🏦" },
 };
 
@@ -223,12 +225,13 @@ function rechargeConfirmText(amount) {
     `💵 *CONFIRM RECHARGE*\n\n` +
     `━━━━━━━━━━━━━━━━━━\n\n` +
     `Amount: *LKR ${formatLKR(amount)}*\n\n` +
-    `Choose a payment method below,\nthen send your payment proof.`
+    `Choose a payment method below.`
   );
 }
 
 function rechargeConfirmMenu() {
   return Markup.inlineKeyboard([
+    [Markup.button.callback("⚡  EZ CASH AUTO VERIFY", "recharge_ez_cash_auto")],
     [Markup.button.callback("💳  EZ CASH", "recharge_ez_cash")],
     [Markup.button.callback("🏦  BANK TRANSFER", "recharge_bank_transfer")],
     [Markup.button.callback("❌  CANCEL", "recharge_cancel")],
@@ -246,6 +249,22 @@ function rechargeProofText(method, amount) {
     `after an admin verifies your payment.\n\n` +
     `Send a screenshot of your payment now.`
   );
+}
+
+function rechargeAutoVerifyText(amount) {
+  return (
+    `⚡ *EZ CASH AUTO VERIFY*\n\n` +
+    `━━━━━━━━━━━━━━━━━━\n\n` +
+    `Amount: *LKR ${formatLKR(amount)}*\n\n` +
+    `Send the *14-digit RN number* from your\neZ Cash payment SMS.\n\n` +
+    `We will verify it instantly and credit\nyour wallet automatically.`
+  );
+}
+
+function rechargeAutoVerifyMenu() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback("❌  CANCEL", "recharge_cancel")],
+  ]);
 }
 
 function rechargeSubmittedText(request) {
@@ -459,6 +478,8 @@ module.exports = {
   getRecharge,
   approveRecharge,
   rejectRecharge,
+  rechargeAutoVerifyText,
+  rechargeAutoVerifyMenu,
   Markup,
   code,
 };

@@ -100,10 +100,14 @@ async function requestRecharge(userId, amount, method, paymentProof) {
     return amountValidation;
   }
 
-  const proofValidation = validatePaymentProof(paymentProof);
+  const isAutoVerify = method === "ez_cash_auto";
 
-  if (!proofValidation.ok) {
-    return proofValidation;
+  if (!isAutoVerify) {
+    const proofValidation = validatePaymentProof(paymentProof);
+
+    if (!proofValidation.ok) {
+      return proofValidation;
+    }
   }
 
   const methodKey = String(method || "").toLowerCase().replace(/\s+/g, "_");

@@ -2433,6 +2433,11 @@ You can start a new order whenever you're ready.`,
 */
 
 bot.on("photo", async (ctx) => {
+  // Handle wallet recharge proof
+  if (ctx.session?.walletFlow?.step === "proof") {
+    return handleWalletFlow(ctx, "");
+  }
+
   const orderId = ctx.session?.orderId;
 
   if (!orderId) {

@@ -414,6 +414,22 @@ async function hydrate() {
   return store.hydrate();
 }
 
+async function getPendingRecharges(limit = 50) {
+  return store.getPendingRecharges(limit);
+}
+
+async function getRecharge(requestId) {
+  return store.getRecharge(requestId);
+}
+
+async function approveRecharge(requestId, adminId) {
+  return store.approveRecharge(requestId, adminId);
+}
+
+async function rejectRecharge(requestId, adminId, reason = null) {
+  return store.rejectRecharge(requestId, adminId, reason);
+}
+
 module.exports = {
   METHODS,
   MIN_RECHARGE,
@@ -439,6 +455,10 @@ module.exports = {
   rechargeReviewMenu,
   walletHistoryText,
   hydrate,
+  getPendingRecharges,
+  getRecharge,
+  approveRecharge,
+  rejectRecharge,
   Markup,
   code,
 };

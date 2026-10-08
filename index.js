@@ -115,22 +115,106 @@ bot.use(async (ctx, next) => {
 | product, so those orders go to manual review rather than being sent a
 | guessed request.
 */
-const topupProvider = new Shop2TopupAdapter({
+const { NexauraTopupAdapter } = require("./src/nexauraTopup");
+
+const shop2topupProvider = new Shop2TopupAdapter({
   productionMode:
     process.env.SHOP2TOPUP_PRODUCTION_MODE === "true",
 
-  // The catalog is this file's business, not the provider module's, so the
-  // product behind an order is resolved here.
   resolveProduct: (order) => {
     if (!order?.gameId || !order?.productKey) {
       return null;
     }
 
     const found = catalog.findPackage(order.gameId, order.productKey);
-
     return found ? found.pkg : null;
   },
 });
+
+const nexauraTopupProvider = new NexauraTopupAdapter({
+  productionMode: true,
+  resolveProduct: (order) => {
+    if (!order?.gameId || !order?.productKey) {
+      return null;
+    }
+
+    const found = catalog.findPackage(order.gameId, order.productKey);
+    return found ? found.pkg : null;
+  },
+});
+
+/**
+ * Smart router that picks the right provider based on game.
+ * Free Fire -> Nexaura, everything else -> Shop2Topup.
+ */
+const topupProvider = {
+  async initialize() {
+    await shop2topupProvider.initialize();
+    await nexauraTopupProvider.initialize();
+  },
+
+  newOrderId() {
+    return shop2topupProvider.newOrderId();
+  },
+
+  canFulfill(order) {
+    if (order?.gameId === "free_fire") {
+      return nexauraTopupProvider.canFulfill(order);
+    }
+    return shop2topupProvider.canFulfill(order);
+  },
+
+  plan(order) {
+    if (order?.gameId === "free_fire") {
+      return nexauraTopupProvider.plan(order);
+    }
+    return shop2topupProvider.plan(order);
+  },
+
+  buildRequest(order) {
+    if (order?.gameId === "free_fire") {
+      return nexauraTopupProvider.buildRequest(order);
+    }
+    return shop2topupProvider.buildRequest(order);
+  },
+
+  async sendTopup(order) {
+    if (order?.gameId === "free_fire") {
+      return nexauraTopupProvider.sendTopup(order);
+    }
+    return shop2topupProvider.sendTopup(order);
+  },
+
+  async checkTopupStatus(order) {
+    if (order?.gameId === "free_fire") {
+      return nexauraTopupProvider.checkTopupStatus(order);
+    }
+    return shop2topupProvider.checkTopupStatus(order);
+  },
+
+  async cancelTopup(order) {
+    if (order?.gameId === "free_fire") {
+      return nexauraTopupProvider.cancelTopup(order);
+    }
+    return shop2topupProvider.cancelTopup(order);
+  },
+
+  isReady() {
+    return shop2topupProvider.isReady() || nexauraTopupProvider.isReady();
+  },
+
+  getStatus() {
+    return {
+      shop2topup: shop2topupProvider.getStatus(),
+      nexaura: nexauraTopupProvider.getStatus(),
+    };
+  },
+
+  async shutdown() {
+    await shop2topupProvider.shutdown();
+    await nexauraTopupProvider.shutdown();
+  },
+};
 
 const STORE_NAME = "HASA GOLD STORE";
 

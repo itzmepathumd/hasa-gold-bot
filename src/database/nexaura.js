@@ -13,6 +13,7 @@
 */
 
 const axios = require("axios");
+const crypto = require("crypto");
 
 const BASE_URL = "https://topup.nexauracore.com/api/v1/reseller";
 const API_KEY = process.env.NEXAURA_API_KEY;
@@ -156,6 +157,98 @@ async function getBalance() {
   } catch (error) {
     console.error("[NEXAURA] Balance check failed:", error.message);
     return null;
+  }
+}
+
+async function placeTopup(playerUid, items, reference) {
+  const client = await getClient();
+
+  if (!client) {
+    return { ok: false, error: "Nexaura API key not configured" };
+  }
+
+  try {
+    const idempotencyKey = crypto.randomUUID();
+
+    const response = await client.post("/topups", {
+      player_uid: String(playerUid),
+      items: items,
+      reference: reference,
+    }, {
+      headers: {
+        "Idempotency-Key": idempotencyKey,
+      },
+    });
+
+    const data = response.data;
+
+    if (data.success && data.order) {
+      const order = data.order;
+
+      return {
+        ok: true,
+        orderId: order.order_id,
+        status: order.status,
+        playerUid: order.player_uid,
+        playerName: order.player_name,
+        items: order.items,
+        totalLkr: Number(order.total_lkr) || 0,
+        clientReference: order.client_reference,
+        createdAt: order.created_at,
+        updatedAt: order.updated_at,
+        duplicate: data.duplicate || false,
+      };
+    }
+
+    return {
+      ok: false,
+      error: data.error?.message || "Topup failed",
+    };
+  } catch (error) {
+    const message =
+      error.response?.data?.error?.message || error.message || "Network error";
+
+    return { ok: false, error: message };
+  }
+}
+
+async function getTopupStatus(orderId) {
+  const client = await getClient();
+
+  if (!client) {
+    return { ok: false, error: "Nexaura API key not configured" };
+  }
+
+  try {
+    const response = await client.get(`/topups/${orderId}`);
+    const data = response.data;
+
+    if (data.success && data.order) {
+      const order = data.order;
+
+      return {
+        ok: true,
+        orderId: order.order_id,
+        status: order.status,
+        playerUid: order.player_uid,
+        playerName: order.player_name,
+        items: order.items,
+        totalLkr: Number(order.total_lkr) || 0,
+        clientReference: order.client_reference,
+        createdAt: order.created_at,
+        updatedAt: order.updated_at,
+      };
+    }
+
+    return {
+      ok: false,
+      error: data.error?.message || "Topup not found",
+    };
+  } catch (error) {
+    const message =
+      error.response?.data?.error?.message || error.message || "Network error";
+
+    return { ok: false, error: message };
   }
 }
 

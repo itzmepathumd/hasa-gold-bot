@@ -102,12 +102,16 @@ async function requestRecharge(userId, amount, method, paymentProof) {
 
   const isAutoVerify = method === "ez_cash_auto";
 
+  let validatedProof = paymentProof;
+
   if (!isAutoVerify) {
     const proofValidation = validatePaymentProof(paymentProof);
 
     if (!proofValidation.ok) {
       return proofValidation;
     }
+
+    validatedProof = proofValidation.proof;
   }
 
   const methodKey = String(method || "").toLowerCase().replace(/\s+/g, "_");
@@ -120,7 +124,7 @@ async function requestRecharge(userId, amount, method, paymentProof) {
     userId,
     amount: amountValidation.amount,
     method: methodKey,
-    paymentProof: proofValidation.proof,
+    paymentProof: validatedProof,
     status: "pending",
   };
 

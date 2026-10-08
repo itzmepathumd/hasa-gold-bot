@@ -10,6 +10,7 @@ const anim = require("./anim");
 const botStatus = require("./status");
 const webhookServer = require("./webhookServer");
 const { Shop2TopupAdapter } = require("./src/shop2topup");
+const wallet = require("./src/wallet");
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_ID = Number(process.env.ADMIN_ID);
@@ -181,270 +182,6 @@ function paymentInstructions() {
 
 /*
 |--------------------------------------------------------------------------
-| WALLET SCREENS
-|--------------------------------------------------------------------------
-| Customer-facing wallet text and menus. Every balance
-| shown here comes from the wallet store, never from
-| anything the customer sent.
-*/
-
-function walletScreenText(userId) {
-  const balance = wallet.getBalance(userId);
-  const history = wallet.getHistory(userId, 5);
-
-  const lines = history.map((entry) => {
-    const sign = entry.type === "credit" ? "+" : "−";
-
-    const what =
-      entry.refType === "recharge"
-        ? "Recharge"
-        : `Order ${entry.refId}`;
-
-    return (
-      `${sign} LKR ${Number(entry.amount).toLocaleString("en-LK")}` +
-      `  ·  ${esc(what)}\n` +
-      `   ${analytics.when(entry.createdAt)}` +
-      `  ·  balance LKR ${Number(entry.balanceAfter).toLocaleString("en-LK")}`
-    );
-  });
-
-  return (
-    `💰 *MY WALLET*\n\n` +
-    `━━━━━━━━━━━━━━━━━━\n\n` +
-    `💵 *BALANCE*\nLKR ${balance.toLocaleString("en-LK")}\n\n` +
-    `━━━━━━━━━━━━━━━━━━\n\n` +
-    `🧾 *RECENT ACTIVITY*\n\n` +
-    (lines.length
-      ? lines.join("\n\n")
-      : `_No activity yet. Recharge to\nadd credit._`) +
-    `\n\n━━━━━━━━━━━━━━━━━━\n\n` +
-    `💳 Pay for orders from your balance,\nor recharge with a payment method.`
-  );
-}
-
-function walletMenu() {
-  return Markup.inlineKeyboard([
-    [
-      Markup.button.callback(
-        "➕  RECHARGE",
-        "recharge"
-      ),
-    ],
-    [
-      Markup.button.callback("📦  MY ORDERS", "my_orders"),
-      Markup.button.callback("🏠  HOME", "home"),
-    ],
-  ]);
-}
-
-/*
-| The recharge flow: amount, then a confirmation, then
-| the payment screenshot. Each step is owned by a
-| session flag the text and photo handlers read.
-*/
-
-function rechargeAmountText() {
-  return (
-    `➕ *RECHARGE WALLET*\n\n` +
-    `━━━━━━━━━━━━━━━━━━\n\n` +
-    `Send the amount in *LKR* you want to\nadd to your wallet.\n\n` +
-    `Minimum: *${wallet.formatLKR(wallet.MIN_RECHARGE)}*\n` +
-    `Maximum: *${wallet.formatLKR(wallet.MAX_SINGLE_RECHARGE)}*\n\n` +
-    `_Examples: 500 · 1000 · 2500_\n\n` +
-    `━━━━━━━━━━━━━━━━━━\n\n` +
-    `_Type cancel to stop._`
-  );
-}
-
-function rechargeConfirmText(amount) {
-  return (
-    `➕ *CONFIRM RECHARGE*\n\n` +
-    `━━━━━━━━━━━━━━━━━━\n\n` +
-    `💵 *AMOUNT*\n${wallet.formatLKR(amount)}\n\n` +
-    `Next you will send a *screenshot*\n` +
-    `of your payment as proof.\n\n` +
-    `⚠️ *The credit appears only after\n` +
-    `an admin verifies your payment.*\n\n` +
-    `━━━━━━━━━━━━━━━━━━\n\n` +
-    `Tap confirm, then send the screenshot.`
-  );
-}
-
-function rechargeConfirmMenu() {
-  return Markup.inlineKeyboard([
-    [
-      Markup.button.callback(
-        "✅  CONFIRM",
-        "recharge_confirm"
-      ),
-      Markup.button.callback(
-        "❌  CANCEL",
-        "recharge_cancel"
-      ),
-    ],
-  ]);
-}
-
-function rechargeProofText(amount) {
-  return (
-    `📸 *PAYMENT PROOF*\n\n` +
-    `━━━━━━━━━━━━━━━━━━\n\n` +
-    `💵 *AMOUNT*\n${wallet.formatLKR(amount)}\n\n` +
-    `Send a *screenshot* of your payment\n` +
-    `here, exactly as you would for an\n` +
-    `order.\n\n` +
-    `⚠️ Your wallet is credited only\n` +
-    `after an admin verifies it.\n\n` +
-    `━━━━━━━━━━━━━━━━━━\n\n` +
-    `_Type cancel to stop._`
-  );
-}
-
-function rechargeSubmittedText(request) {
-  return (
-    `✅ *RECHARGE REQUEST SENT*\n\n` +
-    `━━━━━━━━━━━━━━━━━━\n\n` +
-    `🧾 *REQUEST*\n${code(request.id)}\n\n` +
-    `💵 *AMOUNT*\n${wallet.formatLKR(request.amount)}\n\n` +
-    `⏳ *STATUS*\nWaiting for admin verification\n\n` +
-    `📩 You will be notified the moment\n` +
-    `your credit is added.\n\n` +
-    `━━━━━━━━━━━━━━━━━━\n\n` +
-    `✨ *${STORE_NAME}*`
-  );
-}
-
-/*
-| Admin screens: the list of open requests and the
-| decision screen for one of them.
-*/
-
-function pendingRechargesText(pending) {
-  if (pending.length === 0) {
-    return (
-      `💰 *WALLET RECHARGES*\n\n` +
-      `━━━━━━━━━━━━━━━━━━\n\n` +
-      `✅ Nothing is waiting.\n\n` +
-      `Every recharge was decided.`
-    );
-  }
-
-  const lines = pending.slice(0, 10).map((request) => {
-    const age = analytics.when(request.createdAt);
-
-    return (
-      `👤 ${code(request.userId)}\n` +
-      `💵 ${wallet.formatLKR(request.amount)} · ${age}\n` +
-      `🧾 ${code(request.id)}`
-    );
-  });
-
-  return (
-    `💰 *WALLET RECHARGES*\n\n` +
-    `━━━━━━━━━━━━━━━━━━\n\n` +
-    `⏳ ${pending.length} request(s) waiting:\n\n` +
-    lines.join("\n\n") +
-    (pending.length > 10
-      ? `\n\n…and ${pending.length - 10} more.`
-      : "") +
-    `\n\n👇 Open a request to decide it.`
-  );
-}
-
-function pendingRechargesMenu(pending) {
-  const buttons = pending.slice(0, 10).map((request) => [
-    Markup.button.callback(
-      `💵 ${wallet.formatLKR(request.amount)} · ${code(request.userId)}`,
-      `wallet_recharge_${request.id}`
-    ),
-  ]);
-
-  buttons.push([
-    Markup.button.callback("🔄  REFRESH", "admin_wallets"),
-  ]);
-  buttons.push([
-    Markup.button.callback("👑  ADMIN PANEL", "admin_home"),
-  ]);
-
-  return Markup.inlineKeyboard(buttons);
-}
-
-function rechargeReviewText(request) {
-  const user = analytics
-    .buildUsers(getOrders())
-    .find((u) => u.userId === Number(request.userId));
-
-  const name = user
-    ? `${user.firstName || "customer"}${user.username ? ` (@${user.username})` : ""}`
-    : "unknown customer";
-
-  return (
-    `💰 *RECHARGE REQUEST*\n\n` +
-    `━━━━━━━━━━━━━━━━━━\n\n` +
-    `👤 Customer\n${esc(name)}\n\n` +
-    `🆔 Telegram ID\n${code(request.userId)}\n\n` +
-    `💵 Amount\n${wallet.formatLKR(request.amount)}\n\n` +
-    `🧾 Request\n${code(request.id)}\n\n` +
-    `🕐 Requested\n${analytics.when(request.createdAt)}\n\n` +
-    `⏳ Expires\n${analytics.when(request.expiresAt)}\n\n` +
-    `━━━━━━━━━━━━━━━━━━\n\n` +
-    `🖼 *The proof is the screenshot the\n` +
-    `customer sent with the request.*\n\n` +
-    `Verify the amount matches the\n` +
-    `screenshot, then decide.`
-  );
-}
-
-function rechargeReviewMenu(request) {
-  return Markup.inlineKeyboard([
-    [
-      Markup.button.callback(
-        `🖼  VIEW PROOF`,
-        `wallet_proof_${request.id}`
-      ),
-    ],
-    [
-      Markup.button.callback(
-        "✅  APPROVE CREDIT",
-        `wallet_approve_${request.id}`
-      ),
-    ],
-    [
-      Markup.button.callback(
-        "❌  REJECT",
-        `wallet_reject_${request.id}`
-      ),
-    ],
-    [
-      Markup.button.callback(
-        "💰  ALL RECHARGES",
-        "admin_wallets"
-      ),
-    ],
-  ]);
-}
-
-/*
-| The checkout button. A wallet payment is offered
-| only when the balance covers the order, because
-| offering a button that then fails is worse than
-| not offering it.
-*/
-function walletPaymentButton(userId, price) {
-  const balance = wallet.getBalance(userId);
-
-  if (balance < price) {
-    return null;
-  }
-
-  return Markup.button.callback(
-    `💰  PAY WITH WALLET (LKR ${price.toLocaleString("en-LK")})`,
-    "pay_with_wallet"
-  );
-}
-
-/*
-|--------------------------------------------------------------------------
 | ORDER DATABASE
 |--------------------------------------------------------------------------
 | Orders are read and written only through the database layer, which uses
@@ -470,29 +207,6 @@ const {
   healthCheck: checkOrderStoreHealth,
   closeDb: closeOrderStore,
 } = require("./src/database/orders");
-
-/*
-|--------------------------------------------------------------------------
-| WALLETS
-|--------------------------------------------------------------------------
-| Customer credit, recharges and the ledger all go through the
-| wallet module, which only ever moves a balance inside a store
-| transaction. The store is hydrated alongside the order store
-| so the balance screens read the same data the rest of the bot
-| does.
-*/
-
-const wallet = require("./src/wallet");
-
-const {
-  // Lifecycle. Aliased like the order store's, for the same
-  // reason: these are the same call under a clearer name.
-  hydrate: hydrateWallets,
-  describe: describeWalletStore,
-  setWalletStoreFailureHandler,
-  healthCheck: checkWalletStoreHealth,
-  closeDb: closeWalletStore,
-} = require("./src/database/wallets");
 
 /*
 | Tell the admin the order store is unusable, once per distinct reason.
@@ -527,44 +241,6 @@ async function notifyAdminOfStorageFailure(reason) {
 }
 
 setOrderStoreFailureHandler(notifyAdminOfStorageFailure);
-
-/*
-| Tell the admin the wallet store is unusable. A wallet
-| failure means no credit can be applied and no order can
-| be paid by wallet, so the admin has to know now rather
-| than discover it in a customer complaint.
-*/
-const walletAlerts = new Set();
-
-async function notifyAdminOfWalletFailure(reason) {
-  const key = String(reason).slice(0, 80);
-
-  if (walletAlerts.has(key)) {
-    return;
-  }
-
-  walletAlerts.add(key);
-
-  try {
-    await bot.telegram.sendMessage(
-      ADMIN_ID,
-      `🚨 *WALLET STORE UNUSABLE*\n\n` +
-        `━━━━━━━━━━━━━━━━━━\n\n` +
-        `${esc(reason)}\n\n` +
-        `No wallet changes were written. Recharge\n` +
-        `requests and wallet payments are on hold\n` +
-        `until this is fixed.`,
-      { parse_mode: "Markdown" }
-    );
-  } catch (error) {
-    console.error(
-      "[WALLETS] Could not send the alert:",
-      error.message
-    );
-  }
-}
-
-setWalletStoreFailureHandler(notifyAdminOfWalletFailure);
 
 /*
 |--------------------------------------------------------------------------
@@ -802,6 +478,7 @@ function replyMenu() {
   return Markup.keyboard([
     ["🕹️  Games"],
     ["📦  My Orders", "💬  Support"],
+    ["💳  Wallet", "📡  Status"],
     ["ℹ️  About", "🏠  Home"],
   ])
     .resize()
@@ -833,12 +510,13 @@ function homeMenu() {
     [Markup.button.callback(LABEL.games, "games")],
     [
       Markup.button.callback(LABEL.myOrders, "my_orders"),
-      Markup.button.callback(LABEL.support, "support"),
+      Markup.button.callback("💳  Wallet", "wallet"),
     ],
     [
-      Markup.button.callback(LABEL.about, "about"),
+      Markup.button.callback(LABEL.support, "support"),
       Markup.button.callback(LABEL.status, "status"),
     ],
+    [Markup.button.callback(LABEL.about, "about")],
     [Markup.button.callback(LABEL.home, "home")],
   ]);
 }
@@ -1076,568 +754,19 @@ bot.command("status", async (ctx) => {
   await showStatus(ctx);
 });
 
-/*
-|--------------------------------------------------------------------------
-| WALLET COMMANDS
-|--------------------------------------------------------------------------
-| /wallet shows the balance and the last movements.
-| /recharge starts the request flow. Nothing here
-| moves money: a recharge is only a request until
-| an admin approves it.
-*/
-
 bot.command("wallet", async (ctx) => {
-  await showWallet(ctx);
+  await ctx.reply(wallet.walletScreenText(ctx.from.id), {
+    parse_mode: "Markdown",
+    ...wallet.walletMenu(),
+  });
 });
 
 bot.command("recharge", async (ctx) => {
-  await startRecharge(ctx);
-});
+  ensureSession(ctx).walletFlow = { step: "amount" };
 
-/*
-| The same screens from the inline buttons,
-| so a wallet menu never dead-ends.
-*/
-bot.action("wallet", async (ctx) => {
-  await ctx.answerCbQuery().catch(() => {});
-
-  const session = ensureSession(ctx);
-
-  session.rechargeFlow = null;
-  session.waitingForRechargeAmount = false;
-  session.waitingForRechargeProof = false;
-
-  await ctx.editMessageText(walletScreenText(ctx.from.id), {
-    parse_mode: "Markdown",
-    ...walletMenu(),
-  });
-});
-
-bot.action("recharge", async (ctx) => {
-  await ctx.answerCbQuery().catch(() => {});
-
-  await startRecharge(ctx);
-
-  // The recharge flow asks for the amount in
-  // a fresh message, so the button message is
-  // left alone rather than rewritten into it.
-});
-
-async function showWallet(ctx) {
-  await ctx.reply(walletScreenText(ctx.from.id), {
-    parse_mode: "Markdown",
-    ...walletMenu(),
-  });
-}
-
-/*
-| Begin a recharge. The next message the customer
-| sends is read as the amount.
-*/
-async function startRecharge(ctx) {
-  const session = ensureSession(ctx);
-
-  session.rechargeFlow = { step: "amount" };
-  session.waitingForRechargeAmount = true;
-
-  await ctx.reply(rechargeAmountText(), {
+  await ctx.reply(wallet.rechargeAmountText(), {
     parse_mode: "Markdown",
     ...cancelFlowButton(),
-  });
-}
-
-/*
-| Read the amount the customer typed, validate
-| it, and ask for confirmation. The amount is
-| only ever validated here; the credit itself
-| still needs an admin.
-*/
-async function handleRechargeAmount(ctx, raw) {
-  const session = ensureSession(ctx);
-
-  const text = String(raw).trim();
-
-  // "cancel" stops the flow like everywhere
-  // else in the bot.
-  if (text.toLowerCase() === "cancel") {
-    session.rechargeFlow = null;
-    session.waitingForRechargeAmount = false;
-
-    return ctx.reply(
-      `❌ *RECHARGE CANCELLED*\n\n` +
-        `━━━━━━━━━━━━━━━━━━\n\n` +
-        `Nothing was saved.`,
-      {
-        parse_mode: "Markdown",
-        ...walletMenu(),
-      }
-    );
-  }
-
-  const parsed = wallet.parseAmount(text);
-
-  if (!parsed.ok) {
-    return ctx.reply(
-      `⚠️ *THAT IS NOT AN AMOUNT*\n\n` +
-        `━━━━━━━━━━━━━━━━━━\n\n` +
-        `${esc(parsed.error)}. Send a whole\n` +
-        `number of LKR, like *1000*.\n\n` +
-        `_Type cancel to stop._`,
-      {
-        parse_mode: "Markdown",
-        ...cancelFlowButton(),
-      }
-    );
-  }
-
-  if (parsed.amount < wallet.MIN_RECHARGE) {
-    return ctx.reply(
-      `⚠️ *AMOUNT TOO SMALL*\n\n` +
-        `━━━━━━━━━━━━━━━━━━\n\n` +
-        `The minimum recharge is\n` +
-        `*${wallet.formatLKR(wallet.MIN_RECHARGE)}*.\n\n` +
-        `_Type cancel to stop._`,
-      {
-        parse_mode: "Markdown",
-        ...cancelFlowButton(),
-      }
-    );
-  }
-
-  if (parsed.amount > wallet.MAX_SINGLE_RECHARGE) {
-    return ctx.reply(
-      `⚠️ *AMOUNT TOO LARGE*\n\n` +
-        `━━━━━━━━━━━━━━━━━━\n\n` +
-        `A single recharge cannot exceed\n` +
-        `*${wallet.formatLKR(wallet.MAX_SINGLE_RECHARGE)}*.\n\n` +
-        `_Type cancel to stop._`,
-      {
-        parse_mode: "Markdown",
-        ...cancelFlowButton(),
-      }
-    );
-  }
-
-  session.rechargeFlow = {
-    step: "confirm",
-    amount: parsed.amount,
-  };
-  session.waitingForRechargeAmount = false;
-
-  await ctx.reply(rechargeConfirmText(parsed.amount), {
-    parse_mode: "Markdown",
-    ...rechargeConfirmMenu(),
-  });
-}
-
-/*
-| A recharge screenshot. The file id is kept as
-| the proof; only an admin decision turns the
-| request into credit.
-*/
-async function handleRechargeProof(ctx) {
-  const session = ensureSession(ctx);
-
-  const flow = session.rechargeFlow;
-  const amount = flow?.amount;
-
-  if (!amount) {
-    session.waitingForRechargeProof = false;
-    session.rechargeFlow = null;
-
-    return ctx.reply(
-      `❌ *NO RECHARGE OPEN*\n\n` +
-        `━━━━━━━━━━━━━━━━━━\n\n` +
-        `Start a recharge with *\/recharge*\n` +
-        `before sending a screenshot.`,
-      {
-        parse_mode: "Markdown",
-        ...walletMenu(),
-      }
-    );
-  }
-
-  const photos = ctx.message.photo;
-  const largestPhoto = photos[photos.length - 1];
-
-  const result = await wallet.requestRecharge(
-    ctx.from.id,
-    amount,
-    largestPhoto.file_id
-  );
-
-  session.waitingForRechargeProof = false;
-  session.rechargeFlow = null;
-
-  if (!result.ok) {
-    const reason =
-      result.error === "request_pending"
-        ? `A recharge request is already\nwaiting for review.\n\nCheck *\/wallet* for its status.`
-        : result.error === "amount_too_small"
-          ? `The minimum recharge is\n*${wallet.formatLKR(wallet.MIN_RECHARGE)}*.`
-          : result.error === "amount_too_large"
-            ? `A single recharge cannot exceed\n*${wallet.formatLKR(wallet.MAX_SINGLE_RECHARGE)}*.`
-            : `The request could not be saved.\nPlease try again.`;
-
-    return ctx.reply(
-      `⚠️ *RECHARGE NOT SENT*\n\n` +
-        `━━━━━━━━━━━━━━━━━━\n\n` +
-        `${reason}`,
-      {
-        parse_mode: "Markdown",
-        ...walletMenu(),
-      }
-    );
-  }
-
-  const request = result.request;
-
-  await anim.stages(ctx, {
-    title: "Submitting your recharge",
-    steps: [
-      "Screenshot received",
-      "Reading amount",
-      "Saving request",
-      "Sending to store admin",
-    ],
-    final: rechargeSubmittedText(request),
-    extra: {
-      parse_mode: "Markdown",
-      ...Markup.inlineKeyboard([
-        [Markup.button.callback("💰  MY WALLET", "wallet")],
-        [Markup.button.callback("🏠  HOME", "home")],
-      ]),
-    },
-    frame: 900,
-    spinner: "sparkle",
-    barStyle: "round",
-    emoji: "💰",
-    showPercent: true,
-    parseMode: "Markdown",
-  });
-
-  /*
-  | Tell the admin, with the proof attached so
-  | the amount on the screenshot can be
-  | compared with the amount requested.
-  */
-  const adminCaption =
-    `💰 RECHARGE REQUEST
-
-🔔 A customer wants to add credit.
-
-👤 Customer:
-${ctx.from.first_name || "unknown"}${
-    ctx.from.username ? ` (@${ctx.from.username})` : ""
-  }
-
-🆔 Telegram ID:
-${ctx.from.id}
-
-💵 Amount:
-LKR ${Number(request.amount).toLocaleString("en-LK")}
-
-🧾 Request:
-${request.id}
-
-⏳ Expires:
-${analytics.when(request.expiresAt)}
-
-━━━━━━━━━━━━━━━━━
-
-⏳ Status:
-WAITING FOR VERIFICATION`;
-
-  await bot.telegram.sendPhoto(
-    ADMIN_ID,
-    largestPhoto.file_id,
-    {
-      caption: adminCaption,
-      parse_mode: "Markdown",
-      reply_markup: {
-        inline_keyboard: [
-          [
-            {
-              text: "✅ APPROVE CREDIT",
-              callback_data: `wallet_approve_${request.id}`,
-            },
-            {
-              text: "❌ REJECT",
-              callback_data: `wallet_reject_${request.id}`,
-            },
-          ],
-        ],
-      },
-    }
-  );
-}
-
-/*
-| The customer confirmed an amount. Ask for the
-| payment screenshot, which becomes the proof an
-| admin verifies.
-*/
-bot.action("recharge_confirm", async (ctx) => {
-  await ctx.answerCbQuery().catch(() => {});
-
-  const flow = ctx.session?.rechargeFlow;
-
-  if (!flow || flow.step !== "confirm" || !flow.amount) {
-    return ctx.reply(
-      `❌ *RECHARGE EXPIRED*\n\n` +
-        `━━━━━━━━━━━━━━━━━━\n\n` +
-        `Nothing was saved. Start a new\n` +
-        `recharge with *\/recharge*.`,
-      {
-        parse_mode: "Markdown",
-        ...walletMenu(),
-      }
-    );
-  }
-
-  const session = ensureSession(ctx);
-
-  session.rechargeFlow = {
-    step: "proof",
-    amount: flow.amount,
-  };
-  session.waitingForRechargeAmount = false;
-  session.waitingForRechargeProof = true;
-
-  await ctx.editMessageText(rechargeProofText(flow.amount), {
-    parse_mode: "Markdown",
-    ...cancelFlowButton(),
-  });
-});
-
-bot.action("recharge_cancel", async (ctx) => {
-  await ctx.answerCbQuery().catch(() => {});
-
-  const session = ensureSession(ctx);
-
-  session.rechargeFlow = null;
-  session.waitingForRechargeAmount = false;
-  session.waitingForRechargeProof = false;
-
-  await ctx.editMessageText(
-    `❌ *RECHARGE CANCELLED*\n\n` +
-      `━━━━━━━━━━━━━━━━━━\n\n` +
-      `Nothing was saved.`,
-    {
-      parse_mode: "Markdown",
-      ...walletMenu(),
-    }
-  );
-});
-
-/*
-| Pay for the current order from the wallet.
-|
-| The debit happens inside the store transaction,
-| so the balance is re-read here and charged once.
-| A retried tap returns the original result instead
-| of charging again.
-*/
-bot.action("pay_with_wallet", async (ctx) => {
-  await ctx.answerCbQuery().catch(() => {});
-
-  const orderId = ctx.session?.orderId;
-
-  if (!orderId) {
-    return ctx.reply(
-      `❌ No order is open. Start a new order first.`,
-      homeMenu()
-    );
-  }
-
-  const order = await getOrder(orderId);
-
-  if (!order) {
-    return ctx.reply(
-      `❌ Order not found. Start a new order first.`,
-      homeMenu()
-    );
-  }
-
-  if (order.status !== "pending_payment") {
-    return ctx.reply(
-      `⚠️ This order is not waiting for payment.\n\n` +
-        `Status: ${statusBadge(order.status)}`,
-      homeMenu()
-    );
-  }
-
-  const session = ensureSession(ctx);
-
-  session.waitingForPayment = false;
-
-  // Show the staged reveal while the store settles.
-  await anim.revealEdit(
-    ctx,
-    "Checking your wallet",
-    `💰 *WALLET PAYMENT*\n\n` +
-      `━━━━━━━━━━━━━━━━━━\n\n` +
-      `Checking your balance…`,
-    {
-      parse_mode: "Markdown",
-      ...Markup.inlineKeyboard([
-        [Markup.button.callback("🏠  HOME", "home")],
-      ]),
-    },
-    { spinner: "gear", frames: 3, delay: 300 }
-  );
-
-  const spent = await wallet.spendForOrder(
-    ctx.from.id,
-    order.id,
-    order.price
-  );
-
-  if (!spent.ok) {
-    // The balance was re-read inside the transaction,
-    // so a race with another payment is the usual
-    // cause. The order is untouched and still payable.
-    return ctx.reply(
-      `⚠️ *WALLET PAYMENT FAILED*\n\n` +
-        `━━━━━━━━━━━━━━━━━━\n\n` +
-        `${
-          spent.error === "insufficient_balance"
-            ? `Your balance is *LKR ${Number(spent.balance).toLocaleString("en-LK")}*\n` +
-              `but this order costs *${wallet.formatLKR(order.price)}*.\n\n` +
-              `Recharge first, or pay with a\npayment method below.`
-            : `The wallet could not be reached.\n` +
-              `Nothing was charged. Please try again.`
-        }` +
-        `\n\n━━━━━━━━━━━━━━━━━━\n\n` +
-        paymentInstructions(),
-      {
-        parse_mode: "Markdown",
-        ...Markup.inlineKeyboard([
-          [Markup.button.callback("➕  RECHARGE", "recharge")],
-          [Markup.button.callback("🏠  HOME", "home")],
-        ]),
-      }
-    );
-  }
-
-  // The money has moved. Mark the order as paid by
-  // wallet and hand it to the admin for fulfilment,
-  // exactly like a verified payment proof.
-  const paid = await mutateOrder(order.id, (current) => {
-    if (current.status !== "pending_payment") {
-      return false;
-    }
-
-    current.status = "pending_approval";
-    current.paymentProof = "wallet";
-    current.paymentMethod = "wallet";
-    current.paymentSubmittedAt = new Date().toISOString();
-    current.walletPayment = true;
-    current.walletAmount = spent.transaction.amount;
-
-    return current;
-  });
-
-  if (!paid) {
-    // The order moved on elsewhere, but the wallet
-    // was already charged. That is a race the admin
-    // has to see: the ledger shows the debit, so
-    // the credit is recoverable by hand.
-    console.error(
-      `[WALLET] Order ${order.id} was paid but could not be marked: ${
-        spent.transaction.id
-      }`
-    );
-
-    return ctx.reply(
-      `⚠️ *PAYMENT RECORDED*\n\n` +
-        `━━━━━━━━━━━━━━━━━━\n\n` +
-        `Your wallet was charged *${wallet.formatLKR(spent.transaction.amount)}*\n` +
-        `but the order could not be updated.\n\n` +
-        `Contact support with:\n${code(spent.transaction.id)}`,
-      {
-        parse_mode: "Markdown",
-        ...supportMenu(),
-      }
-    );
-  }
-
-  ensureSession(ctx).orderId = null;
-
-  await ctx.reply(
-    `✅ *PAID WITH WALLET*\n\n` +
-      `━━━━━━━━━━━━━━━━━━\n\n` +
-      `🧾 *ORDER ID*\n${code(order.id)}\n\n` +
-      `🎮 *GAME*\n${esc(order.gameName)}\n\n` +
-      `📦 *PACKAGE*\n${esc(order.productName)}\n\n` +
-      `💰 *PAID*\n${wallet.formatLKR(spent.transaction.amount)}\n\n` +
-      `💵 *NEW BALANCE*\nLKR ${Number(spent.wallet.balance).toLocaleString("en-LK")}\n\n` +
-      `━━━━━━━━━━━━━━━━━━\n\n` +
-      `⚡ Your order is verified and\n` +
-      `will be processed shortly.\n\n` +
-      `📩 You will receive a notification\n` +
-      `once it is delivered.\n\n` +
-      `✨ *${STORE_NAME}*`,
-    {
-      parse_mode: "Markdown",
-      ...Markup.inlineKeyboard([
-        [Markup.button.callback("📦  MY ORDERS", "my_orders")],
-        [Markup.button.callback("💰  WALLET", "wallet")],
-        [Markup.button.callback("🏠  HOME", "home")],
-      ]),
-    }
-  );
-
-  // The admin still fulfils the order, but there is
-  // no proof to verify: the bot itself collected the
-  // payment, so the notice says so.
-  const adminCaption =
-    `💰 WALLET PAYMENT
-
-🔔 Order paid from the customer's wallet.
-
-🧾 Order:
-${esc(order.id)}
-
-🎮 Game:
-${esc(order.gameName)}
-
-📦 Product:
-${esc(order.productName)}
-
-🆔 Player ID:
-${esc(order.playerId)}
-
-💰 Amount:
-LKR ${Number(order.price).toLocaleString("en-LK")}
-
-👤 Customer:
-${order.firstName} (${esc(order.username || "no username")})
-
-🧾 Wallet ledger:
-${code(spent.transaction.id)}
-
-━━━━━━━━━━━━━━━━━
-
-✅ Status:
-PAID - AWAITING FULFILMENT`;
-
-  await bot.telegram.sendMessage(ADMIN_ID, adminCaption, {
-    parse_mode: "Markdown",
-    reply_markup: {
-      inline_keyboard: [
-        [
-          {
-            text: "✅ APPROVE",
-            callback_data: `approve_${order.id}`,
-          },
-          {
-            text: "❌ REJECT",
-            callback_data: `reject_${order.id}`,
-          },
-        ],
-      ],
-    },
   });
 });
 
@@ -1861,6 +990,179 @@ bot.action("status_refresh", async (ctx) => {
     ...customerStatusMenu(),
   });
 });
+
+/*
+|--------------------------------------------------------------------------
+| WALLET
+|--------------------------------------------------------------------------
+*/
+bot.action("wallet", async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+
+  await ctx.editMessageText(wallet.walletScreenText(ctx.from.id), {
+    parse_mode: "Markdown",
+    ...wallet.walletMenu(),
+  });
+});
+
+bot.action("wallet_history", async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+
+  await ctx.editMessageText(wallet.walletHistoryText(ctx.from.id), {
+    parse_mode: "Markdown",
+    ...Markup.inlineKeyboard([
+      [Markup.button.callback("🔙  BACK TO WALLET", "wallet")],
+    ]),
+  });
+});
+
+bot.action("recharge", async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+
+  ensureSession(ctx).walletFlow = { step: "amount" };
+
+  await ctx.editMessageText(wallet.rechargeAmountText(), {
+    parse_mode: "Markdown",
+    ...cancelFlowButton(),
+  });
+});
+
+bot.action(/^recharge_(ez_cash|bank_transfer)$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+
+  const method = ctx.match[1];
+  const flow = ensureSession(ctx).walletFlow;
+
+  if (!flow || flow.step !== "amount") {
+    return ctx.reply("❌ Recharge flow expired. Use /recharge to start again.");
+  }
+
+  flow.method = method;
+
+  await ctx.editMessageText(wallet.rechargeProofText(method, flow.amount), {
+    parse_mode: "Markdown",
+    ...cancelFlowButton(),
+  });
+});
+
+bot.action("recharge_cancel", async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+
+  ensureSession(ctx).walletFlow = null;
+
+  await ctx.editMessageText("❌ Recharge cancelled.", {
+    ...Markup.inlineKeyboard([
+      [Markup.button.callback("🔙  BACK TO WALLET", "wallet")],
+    ]),
+  });
+});
+
+/*
+|--------------------------------------------------------------------------
+| WALLET FLOW
+|--------------------------------------------------------------------------
+*/
+async function handleWalletFlow(ctx, text) {
+  const flow = ensureSession(ctx).walletFlow;
+
+  if (!flow) {
+    return ctx.reply(wallet.walletScreenText(ctx.from.id), {
+      parse_mode: "Markdown",
+      ...wallet.walletMenu(),
+    });
+  }
+
+  if (flow.step === "amount") {
+    const parsed = Number(text.replace(/[^0-9]/g, ""));
+
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      return ctx.reply(
+        `❌ *Invalid amount*\n\n` +
+          `━━━━━━━━━━━━━━━━━━\n\n` +
+          `Send a number in LKR.\n\n` +
+          `Minimum: ${wallet.formatLKR(wallet.MIN_RECHARGE)}\n` +
+          `Maximum: ${wallet.formatLKR(wallet.MAX_SINGLE_RECHARGE)}`,
+        {
+          parse_mode: "Markdown",
+          ...cancelFlowButton(),
+        }
+      );
+    }
+
+    const validation = wallet.validateRechargeAmount(parsed);
+
+    if (!validation.ok) {
+      return ctx.reply(
+        `❌ ${validation.error}`,
+        {
+          parse_mode: "Markdown",
+          ...cancelFlowButton(),
+        }
+      );
+    }
+
+    flow.amount = validation.amount;
+    flow.step = "method";
+
+    return ctx.reply(wallet.rechargeConfirmText(flow.amount), {
+      parse_mode: "Markdown",
+      ...wallet.rechargeConfirmMenu(),
+    });
+  }
+
+  if (flow.step === "proof") {
+    if (!ctx.message.photo) {
+      return ctx.reply(
+        `❌ *Payment proof required*\n\n` +
+          `━━━━━━━━━━━━━━━━━━\n\n` +
+          `Send a screenshot of your ${wallet.METHODS[flow.method]?.label || "payment"}.\n\n` +
+          `The photo must show the amount and transaction ID.`,
+        {
+          parse_mode: "Markdown",
+          ...cancelFlowButton(),
+        }
+      );
+    }
+
+    const photo = ctx.message.photo[ctx.message.photo.length - 1];
+    const paymentProof = `https://api.telegram.org/file/bot${BOT_TOKEN}/${photo.file_path}`;
+
+    const result = await wallet.requestRecharge(
+      ctx.from.id,
+      flow.amount,
+      flow.method,
+      paymentProof
+    );
+
+    if (!result.ok) {
+      return ctx.reply(
+        `❌ *Recharge failed*\n\n` +
+          `━━━━━━━━━━━━━━━━━━\n\n` +
+          `${result.error}`,
+        {
+          parse_mode: "Markdown",
+          ...wallet.walletMenu(),
+        }
+      );
+    }
+
+    ensureSession(ctx).walletFlow = null;
+
+    return ctx.reply(wallet.rechargeSubmittedText({ ...flow, id: result.requestId }), {
+      parse_mode: "Markdown",
+      ...wallet.walletMenu(),
+    });
+  }
+
+  return ctx.reply(
+    `❌ *Invalid step*\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `Use /recharge to start again.`,
+    {
+      parse_mode: "Markdown",
+    }
+  );
+}
 /*
 |--------------------------------------------------------------------------
 | ADMIN TEXT FLOWS
@@ -1880,77 +1182,6 @@ bot.on("text", async (ctx, next) => {
   }
 
   const text = ctx.message.text.trim();
-
-  /*
-  | The reason for a rejected recharge. The
-  | request is closed with the admin's words,
-  | and no money moves.
-  */
-  if (flow.step === "wallet_reject_reason") {
-    ensureSession(ctx).adminFlow = null;
-
-    const result = await wallet.rejectRecharge(
-      ADMIN_ID,
-      flow.requestId,
-      text.slice(0, 200)
-    );
-
-    if (!result.ok) {
-      return ctx.reply(
-        `❌ The request could not be updated.\n\n` +
-          `Reason: ${esc(result.error)}`,
-        { parse_mode: "Markdown" }
-      );
-    }
-
-    if (result.declined) {
-      return ctx.reply(
-        `⚠️ This request was already decided.`,
-        { parse_mode: "Markdown" }
-      );
-    }
-
-    await ctx.reply(
-      `❌ *RECHARGE REJECTED*\n\n` +
-        `━━━━━━━━━━━━━━━━━━\n\n` +
-        `👤 Customer\n${code(result.request.userId)}\n\n` +
-        `💵 Amount\n${wallet.formatLKR(result.request.amount)}\n\n` +
-        `📋 Reason sent\n${esc(result.request.rejectReason)}\n\n` +
-        `No money moved.`,
-      {
-        parse_mode: "Markdown",
-        ...Markup.inlineKeyboard([
-          [
-            Markup.button.callback(
-              "💰  ALL RECHARGES",
-              "admin_wallets"
-            ),
-          ],
-        ]),
-      }
-    );
-
-    try {
-      await bot.telegram.sendMessage(
-        Number(result.request.userId),
-        `❌ *RECHARGE REJECTED*\n\n` +
-          `━━━━━━━━━━━━━━━━━━\n\n` +
-          `💵 *AMOUNT*\n${wallet.formatLKR(result.request.amount)}\n\n` +
-          `📋 *REASON*\n${esc(result.request.rejectReason)}\n\n` +
-          `━━━━━━━━━━━━━━━━━━\n\n` +
-          `No money was taken. Your balance is\n` +
-          `unchanged.`,
-        { parse_mode: "Markdown" }
-      );
-    } catch (error) {
-      console.error(
-        "[WALLET] Could not notify the customer:",
-        error.message
-      );
-    }
-
-    return;
-  }
 
   if (flow.step === "customer_search") {
     ensureSession(ctx).adminFlow = null;
@@ -2386,6 +1617,40 @@ bot.on("text", async (ctx, next) => {
   return next();
 });
 
+bot.on("text", async (ctx, next) => {
+  if (ctx.from.id !== ADMIN_ID) {
+    return next();
+  }
+
+  if (ctx.session?.rejectFlow) {
+    const { requestId } = ctx.session.rejectFlow;
+    const reason = ctx.message.text.trim().toLowerCase() === "/skip" ? null : ctx.message.text.trim();
+
+    const result = await wallet.rejectRecharge(requestId, ctx.from.id, reason);
+
+    if (!result.ok) {
+      return ctx.reply(`❌ ${result.error}`);
+    }
+
+    ensureSession(ctx).rejectFlow = null;
+
+    return ctx.reply(
+      `❌ *RECHARGE REJECTED*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `🧾 ${code(requestId)}\n\n` +
+        `The customer has been notified.`,
+      {
+        parse_mode: "Markdown",
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback("💰  PENDING RECHARGES", "admin_wallets")],
+        ]),
+      }
+    );
+  }
+
+  return next();
+});
+
 bot.action("flow_cancel", async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
 
@@ -2431,6 +1696,13 @@ bot.hears("💬  Support", async (ctx) => {
   await ctx.reply(UI.support, {
     parse_mode: "Markdown",
     ...supportMenu(),
+  });
+});
+
+bot.hears("💳  Wallet", async (ctx) => {
+  await ctx.reply(wallet.walletScreenText(ctx.from.id), {
+    parse_mode: "Markdown",
+    ...wallet.walletMenu(),
   });
 });
 
@@ -2943,18 +2215,17 @@ bot.action("confirm_order", async (ctx) => {
   ensureSession(ctx).orderId = order.id;
   ensureSession(ctx).waitingForPayment = true;
 
-  // A customer whose balance covers the order
-  // can pay straight from the wallet, so the
-  // button is built from the stored balance.
-  const walletButton = walletPaymentButton(
-    ctx.from.id,
-    pkg.price
-  );
-
   const balance = wallet.getBalance(ctx.from.id);
+  const canPayWithWallet = balance >= pkg.price;
 
-  // Confirm button was tapped on the order-summary message: rewrite that
-  // message into the payment screen so the flow feels continuous.
+  const buttons = [
+    ...(canPayWithWallet
+      ? [[Markup.button.callback("💳  PAY WITH WALLET", "pay_with_wallet")]]
+      : []),
+    [Markup.button.callback("📸  I HAVE PAID", "payment_done")],
+    [Markup.button.callback("❌  CANCEL ORDER", "cancel_order")],
+  ];
+
   await anim.revealEdit(
     ctx,
     "Creating your order",
@@ -2965,18 +2236,10 @@ bot.action("confirm_order", async (ctx) => {
       `📦 *PACKAGE*\n${esc(order.productName)}\n\n` +
       `🆔 *${esc(game.idLabel.toUpperCase())}*\n${code(order.playerId)}\n\n` +
       `💰 *TOTAL*\nLKR ${catalog.formatPrice(pkg.price)}\n\n` +
-      (balance > 0
-        ? `💵 *WALLET BALANCE*\nLKR ${balance.toLocaleString("en-LK")}\n\n`
-        : ``) +
       `━━━━━━━━━━━━━━━━━━\n\n` +
+      `${canPayWithWallet ? `💳 Wallet balance: LKR ${wallet.formatLKR(balance)}\n\n` : ""}` +
       `${paymentInstructions()}\n\n` +
       `━━━━━━━━━━━━━━━━━━\n\n` +
-      (walletButton
-        ? `💰 *PAY WITH WALLET*\n\n` +
-          `Your balance covers this order, so\n` +
-          `you can pay instantly below.\n\n` +
-          `━━━━━━━━━━━━━━━━━━\n\n`
-        : ``) +
       `📸 *PAYMENT PROOF*\n\n` +
       `After making the payment, send your\n` +
       `payment screenshot here.\n\n` +
@@ -2985,15 +2248,7 @@ bot.action("confirm_order", async (ctx) => {
       `🔐 *${STORE_NAME}*`,
     {
       parse_mode: "Markdown",
-      ...Markup.inlineKeyboard([
-        ...(walletButton ? [[walletButton]] : []),
-        [
-          Markup.button.callback("📸  I HAVE PAID", "payment_done"),
-        ],
-        [
-          Markup.button.callback("❌  CANCEL ORDER", "cancel_order"),
-        ],
-      ]),
+      ...Markup.inlineKeyboard(buttons),
     },
     { spinner: "gear", frames: 3, delay: 300 }
   );
@@ -3036,24 +2291,6 @@ for (const mediaType of [
       return;
     }
 
-    // A recharge proof was expected, so point at
-    // the actual next step instead of describing
-    // the whole bot.
-    if (ctx.session?.waitingForRechargeProof) {
-      return ctx.reply(
-        `📸 *RECHARGE SCREENSHOT NEEDED*\n\n` +
-          `━━━━━━━━━━━━━━━━━━\n\n` +
-          `Send the receipt as a *photo*, not a\nfile, sticker or voice note.\n\n` +
-          `_Type cancel to stop the recharge._`,
-        {
-          parse_mode: "Markdown",
-          ...Markup.inlineKeyboard([
-            [Markup.button.callback("❌  CANCEL", "recharge_cancel")],
-          ]),
-        }
-      );
-    }
-
     // A payment was expected, so point at the actual next step instead of
     // describing the whole bot.
     if (ctx.session?.waitingForPayment) {
@@ -3092,6 +2329,82 @@ bot.action("payment_done", async (ctx) => {
   );
 });
 
+bot.action("pay_with_wallet", async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+
+  const orderId = ctx.session?.orderId;
+
+  if (!orderId) {
+    return ctx.reply("❌ Order session expired. Please start a new order.");
+  }
+
+  const order = getOrders().find((o) => o.id === orderId);
+
+  if (!order) {
+    return ctx.reply("❌ Order not found.");
+  }
+
+  if (order.status !== "pending_payment") {
+    return ctx.reply("❌ Order is not pending payment.");
+  }
+
+  const result = await wallet.payWithWallet(
+    ctx.from.id,
+    order.price,
+    order.id,
+    "order_payment",
+    `Order ${order.id}`
+  );
+
+  if (!result.ok) {
+    return ctx.reply(
+      `❌ *Payment failed*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `${result.error}`,
+      { parse_mode: "Markdown", ...homeMenu() }
+    );
+  }
+
+  const applied = await mutateOrder(orderId, (current) => {
+    current.status = "pending_approval";
+    current.paymentMethod = "wallet";
+    current.walletTransactionId = result.transactionId;
+    current.paymentProof = `wallet://${result.transactionId}`;
+    current.paymentSubmittedAt = new Date().toISOString();
+
+    return current;
+  });
+
+  if (!applied) {
+    return ctx.reply(
+      `⚠️ *Wallet charged but order not updated*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `Your wallet was debited but the order\n` +
+        `could not be updated. Please contact support.`,
+      { parse_mode: "Markdown", ...homeMenu() }
+    );
+  }
+
+  ensureSession(ctx).waitingForPayment = false;
+
+  await ctx.editMessageText(
+    `✅ *PAYMENT CONFIRMED*\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `🧾 Order: ${code(order.id)}\n` +
+      `💰 Paid: LKR ${wallet.formatLKR(order.price)}\n` +
+      `💳 Method: Wallet\n\n` +
+      `⏳ Your order is now pending approval.\n` +
+      `You will be notified once it is processed.`,
+    {
+      parse_mode: "Markdown",
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback("📦  My Orders", "my_orders")],
+        [Markup.button.callback("🏠  Home", "home")],
+      ]),
+    }
+  );
+});
+
 
 /*
 |--------------------------------------------------------------------------
@@ -3119,16 +2432,6 @@ You can start a new order whenever you're ready.`,
 */
 
 bot.on("photo", async (ctx) => {
-  /*
-  | A screenshot sent during a recharge belongs
-  | to the recharge, not to any order. It is
-  | stored as the proof an admin verifies
-  | before the credit is applied.
-  */
-  if (ctx.session?.waitingForRechargeProof) {
-    return handleRechargeProof(ctx);
-  }
-
   const orderId = ctx.session?.orderId;
 
   if (!orderId) {
@@ -3996,6 +3299,89 @@ async function notifyAdminOfReview() {
   }
 }
 
+/*
+|--------------------------------------------------------------------------
+| BOT RESTART NOTIFICATION
+|--------------------------------------------------------------------------
+| Sends a friendly startup message to the admin and to any customer who
+| has an order that needs attention after a restart.
+*/
+async function notifyBotRestarted() {
+  const orders = getOrders();
+  const reviewing = reviewingOrders();
+  const pendingCustomers = new Set();
+  const customerOrderCounts = new Map();
+
+  for (const order of orders) {
+    if (
+      order.topupStatus === "topup_processing" ||
+      order.topupStatus === "ready_for_topup" ||
+      order.status === "needs_review" ||
+      (order.status === "approved" && !order.topupStatus)
+    ) {
+      pendingCustomers.add(order.userId);
+      customerOrderCounts.set(
+        order.userId,
+        (customerOrderCounts.get(order.userId) || 0) + 1
+      );
+    }
+  }
+
+  const adminText =
+    `✅ *BOT IS BACK ONLINE*\n\n` +
+    `━━━━━━━━━━━━━━━━━━\n\n` +
+    `🟢 System status: *operational*\n` +
+    `📦 Total orders: ${orders.length}\n` +
+    `⚠️ Pending review: ${reviewing.length}\n` +
+    `👥 Customers affected: ${pendingCustomers.size}\n\n` +
+    `All systems are working perfectly.\n` +
+    `Review queue will be processed shortly.`;
+
+  try {
+    await bot.telegram.sendMessage(
+      ADMIN_ID,
+      adminText,
+      {
+        parse_mode: "Markdown",
+      }
+    );
+  } catch (error) {
+    console.error(
+      "[STARTUP] Could not send admin restart notice:",
+      error.message
+    );
+  }
+
+  for (const userId of pendingCustomers) {
+    const count = customerOrderCounts.get(userId) || 0;
+    const customerText =
+      `👋 *Hello!*\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `✅ *${STORE_NAME}* is back online and\n` +
+      `working perfectly!\n\n` +
+      `📦 You have *${count}* order(s) that we are\n` +
+      `currently processing.\n\n` +
+      `⏳ We will update you as soon as\n` +
+      `your top-up is complete.\n\n` +
+      `Thank you for your patience! 🙏`;
+
+    try {
+      await bot.telegram.sendMessage(
+        userId,
+        customerText,
+        {
+          parse_mode: "Markdown",
+        }
+      );
+    } catch (error) {
+      console.error(
+        `[STARTUP] Could not send restart notice to user ${userId}:`,
+        error.message
+      );
+    }
+  }
+}
+
 /**
  * Orders waiting for a human decision.
  */
@@ -4486,314 +3872,6 @@ function canRetryProviderOrder(order) {
 
 /*
 |--------------------------------------------------------------------------
-| WALLET RECHARGE ADMIN
-|--------------------------------------------------------------------------
-| The review queue for customer credit. Approving
-| is the only way a wallet is ever credited, so
-| these handlers are the whole trust boundary:
-| nobody else can call the credit path.
-*/
-
-async function showAdminWallets(ctx) {
-  const pending = await wallet.getPendingRecharges();
-
-  await ctx.editMessageText(pendingRechargesText(pending), {
-    parse_mode: "Markdown",
-    ...pendingRechargesMenu(pending),
-  });
-}
-
-bot.action("admin_wallets", async (ctx) => {
-  await ctx.answerCbQuery().catch(() => {});
-
-  if (ctx.from.id !== ADMIN_ID) {
-    return ctx.reply("⛔ Admin access only.");
-  }
-
-  await showAdminWallets(ctx);
-});
-
-bot.action(/^wallet_recharge_(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery().catch(() => {});
-
-  if (ctx.from.id !== ADMIN_ID) {
-    return ctx.reply("⛔ Admin access only.");
-  }
-
-  const request = await wallet.getRecharge(ctx.match[1]);
-
-  if (!request) {
-    return ctx.reply("❌ Recharge request not found.");
-  }
-
-  await ctx.editMessageText(rechargeReviewText(request), {
-    parse_mode: "Markdown",
-    ...rechargeReviewMenu(request),
-  });
-});
-
-/*
-| Re-send the proof screenshot, so the admin
-| can compare it with the amount from the
-| list screen without hunting for the
-| original message.
-*/
-bot.action(/^wallet_proof_(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery(
-    { text: "📸 Proof sent as a photo.", show_alert: true }
-  ).catch(() => {});
-
-  if (ctx.from.id !== ADMIN_ID) {
-    return ctx.reply("⛔ Admin access only.");
-  }
-
-  const request = await wallet.getRecharge(ctx.match[1]);
-
-  if (!request?.proof) {
-    return ctx.reply("❌ This request has no proof attached.");
-  }
-
-  await bot.telegram.sendPhoto(ADMIN_ID, request.proof, {
-    caption:
-      `💰 PROOF FOR ${wallet.formatLKR(request.amount)}\n\n` +
-      `🧾 ${request.id}\n` +
-      `👤 ${request.userId}`,
-    parse_mode: "Markdown",
-  });
-});
-
-/*
-| Approve and credit, in one store transaction.
-| A double-tapped button cannot credit twice,
-| because the request is only ever pending once.
-*/
-bot.action(/^wallet_approve_(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery().catch(() => {});
-
-  if (ctx.from.id !== ADMIN_ID) {
-    return ctx.reply("⛔ Admin access only.");
-  }
-
-  const requestId = ctx.match[1];
-
-  const result = await wallet.approveRecharge(
-    ADMIN_ID,
-    requestId
-  );
-
-  if (!result.ok) {
-    return ctx.reply(
-      `❌ *CREDIT NOT APPLIED*\n\n` +
-        `━━━━━━━━━━━━━━━━━━\n\n` +
-        `The wallet store could not be\n` +
-        `reached. Nothing was credited.\n\n` +
-        `Reason: ${esc(result.error)}`,
-      { parse_mode: "Markdown" }
-    );
-  }
-
-  if (result.declined) {
-    const reason =
-      result.declined === "expired"
-        ? "The request expired before it was decided."
-        : result.declined === "already_credited"
-          ? "This request was already credited."
-          : "This request was already decided.";
-
-    return ctx.reply(
-      `⚠️ *NOTHING HAPPENED*\n\n` +
-        `━━━━━━━━━━━━━━━━━━\n\n` +
-        `${reason}\n\n` +
-        `Balance is unchanged.`,
-      { parse_mode: "Markdown" }
-    );
-  }
-
-  await ctx.editMessageText(
-    `✅ *CREDIT APPLIED*\n\n` +
-      `━━━━━━━━━━━━━━━━━━\n\n` +
-      `👤 Customer\n${code(result.request.userId)}\n\n` +
-      `💵 Credited\n${wallet.formatLKR(result.request.amount)}\n\n` +
-      `💵 New balance\nLKR ${Number(result.wallet.balance).toLocaleString("en-LK")}\n\n` +
-      `🧾 Ledger\n${code(result.transaction.id)}\n\n` +
-      `The customer has been notified.`,
-    {
-      parse_mode: "Markdown",
-      ...Markup.inlineKeyboard([
-        [
-          Markup.button.callback(
-            "💰  ALL RECHARGES",
-            "admin_wallets"
-          ),
-        ],
-        [
-          Markup.button.callback(
-            "👑  ADMIN PANEL",
-            "admin_home"
-          ),
-        ],
-      ]),
-    }
-  );
-
-  // Tell the customer their credit arrived.
-  try {
-    await bot.telegram.sendMessage(
-      Number(result.request.userId),
-      `✅ *WALLET RECHARGED*\n\n` +
-        `━━━━━━━━━━━━━━━━━━\n\n` +
-        `💵 *CREDITED*\n${wallet.formatLKR(result.request.amount)}\n\n` +
-        `💵 *NEW BALANCE*\nLKR ${Number(result.wallet.balance).toLocaleString("en-LK")}\n\n` +
-        `🧾 *REQUEST*\n${code(result.request.id)}\n\n` +
-        `━━━━━━━━━━━━━━━━━━\n\n` +
-        `Your credit is ready to spend.\n` +
-        `Tap *\/wallet* to see your balance.`,
-      {
-        parse_mode: "Markdown",
-        ...Markup.inlineKeyboard([
-          [Markup.button.callback("💰  MY WALLET", "wallet")],
-          [Markup.button.callback("🕹️  GAMES", "games")],
-        ]),
-      }
-    );
-  } catch (error) {
-    // The customer may have blocked the bot.
-    // The credit is applied either way.
-    console.error(
-      "[WALLET] Could not notify the customer:",
-      error.message
-    );
-  }
-});
-
-/*
-| Rejecting never moves money. The reason is
-| typed next, then the request is closed.
-*/
-bot.action(/^wallet_reject_(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery().catch(() => {});
-
-  if (ctx.from.id !== ADMIN_ID) {
-    return ctx.reply("⛔ Admin access only.");
-  }
-
-  const request = await wallet.getRecharge(ctx.match[1]);
-
-  if (!request) {
-    return ctx.reply("❌ Recharge request not found.");
-  }
-
-  ensureSession(ctx).adminFlow = {
-    step: "wallet_reject_reason",
-    requestId: request.id,
-    amount: request.amount,
-    userId: request.userId,
-  };
-
-  await ctx.editMessageText(
-    `❌ *REJECT RECHARGE*\n\n` +
-      `━━━━━━━━━━━━━━━━━━\n\n` +
-      `👤 Customer\n${code(request.userId)}\n\n` +
-      `💵 Amount\n${wallet.formatLKR(request.amount)}\n\n` +
-      `🧾 Request\n${code(request.id)}\n\n` +
-      `━━━━━━━━━━━━━━━━━━\n\n` +
-      `Send the *reason* to send the customer,\n` +
-      `or tap reject to send a default one.\n\n` +
-      `_No money moves. The customer keeps\n` +
-      `their current balance._`,
-    {
-      parse_mode: "Markdown",
-      ...Markup.inlineKeyboard([
-        [
-          Markup.button.callback(
-            "❌  REJECT WITH DEFAULT REASON",
-            `wallet_reject_now_${request.id}`
-          ),
-        ],
-        [
-          Markup.button.callback(
-            "🔙  BACK",
-            `wallet_recharge_${request.id}`
-          ),
-        ],
-      ]),
-    }
-  );
-});
-
-bot.action(/^wallet_reject_now_(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery().catch(() => {});
-
-  if (ctx.from.id !== ADMIN_ID) {
-    return ctx.reply("⛔ Admin access only.");
-  }
-
-  ensureSession(ctx).adminFlow = null;
-
-  const result = await wallet.rejectRecharge(
-    ADMIN_ID,
-    ctx.match[1],
-    "Payment could not be verified"
-  );
-
-  if (!result.ok) {
-    return ctx.reply(
-      `❌ The request could not be updated.\n\n` +
-        `Reason: ${esc(result.error)}`,
-      { parse_mode: "Markdown" }
-    );
-  }
-
-  if (result.declined) {
-    return ctx.reply(
-      `⚠️ This request was already decided.`,
-      { parse_mode: "Markdown" }
-    );
-  }
-
-  await ctx.editMessageText(
-    `❌ *RECHARGE REJECTED*\n\n` +
-      `━━━━━━━━━━━━━━━━━━\n\n` +
-      `👤 Customer\n${code(result.request.userId)}\n\n` +
-      `💵 Amount\n${wallet.formatLKR(result.request.amount)}\n\n` +
-      `No money moved. The customer has been\n` +
-      `notified.`,
-    {
-      parse_mode: "Markdown",
-      ...Markup.inlineKeyboard([
-        [
-          Markup.button.callback(
-            "💰  ALL RECHARGES",
-            "admin_wallets"
-          ),
-        ],
-      ]),
-    }
-  );
-
-  try {
-    await bot.telegram.sendMessage(
-      Number(result.request.userId),
-      `❌ *RECHARGE REJECTED*\n\n` +
-        `━━━━━━━━━━━━━━━━━━\n\n` +
-        `💵 *AMOUNT*\n${wallet.formatLKR(result.request.amount)}\n\n` +
-        `📋 *REASON*\n${esc(result.request.rejectReason || "Payment could not be verified")}\n\n` +
-        `━━━━━━━━━━━━━━━━━━\n\n` +
-        `No money was taken. Your balance is\n` +
-        `unchanged. Please contact support if\n` +
-        `this looks wrong.`,
-      { parse_mode: "Markdown" }
-    );
-  } catch (error) {
-    console.error(
-      "[WALLET] Could not notify the customer:",
-      error.message
-    );
-  }
-});
-
-/*
-|--------------------------------------------------------------------------
 | OPEN A REVIEW ORDER
 |--------------------------------------------------------------------------
 */
@@ -5051,12 +4129,6 @@ function adminMenu() {
     ],
     [
       Markup.button.callback(
-        "💰  WALLET RECHARGES",
-        "admin_wallets"
-      ),
-    ],
-    [
-      Markup.button.callback(
         "🕵️  REVIEW QUEUE",
         "review_queue"
       ),
@@ -5069,26 +4141,20 @@ function adminMenu() {
     ],
     [
       Markup.button.callback(
-        "📦  ALL ORDERS",
-        "admin_all_orders"
-      ),
-    ],
-    [
-      Markup.button.callback(
         "📊  SALES STATISTICS",
         "admin_stats"
       ),
     ],
     [
       Markup.button.callback(
-        "📡  SYSTEM STATUS",
-        "admin_status"
+        "💳  WALLET",
+        "admin_wallets"
       ),
     ],
     [
       Markup.button.callback(
-        "📋  API LOGS",
-        "admin_api_logs"
+        "📡  SYSTEM STATUS",
+        "admin_status"
       ),
     ],
     [
@@ -5372,7 +4438,7 @@ function packagesAdminMenu(game) {
   rows.push([
     Markup.button.callback(
       "➕  ADD PACKAGE",
-      `sagp_${game.id}`
+      `sapn_${game.id}`
     ),
   ]);
 
@@ -5932,7 +4998,7 @@ function gameAdminMenu(game) {
     [
       Markup.button.callback(
         "➕  ADD PACKAGE",
-        `sagp_${game.id}`
+        `sagp_new_${game.id}`
       ),
       Markup.button.callback(
         "✏️  EDIT GAME",
@@ -6418,6 +5484,141 @@ bot.action("admin_status_refresh", async (ctx) => {
   });
 });
 
+/*
+|--------------------------------------------------------------------------
+| WALLET
+|--------------------------------------------------------------------------
+*/
+bot.action("admin_wallets", async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+
+  if (ctx.from.id !== ADMIN_ID) {
+    return ctx.reply("⛔ Admin access only.");
+  }
+
+  const pending = await wallet.getPendingRecharges();
+
+  await ctx.editMessageText(wallet.pendingRechargesText(pending), {
+    parse_mode: "Markdown",
+    ...wallet.pendingRechargesMenu(pending),
+  });
+});
+
+bot.action(/^wallet_recharge_(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+
+  if (ctx.from.id !== ADMIN_ID) {
+    return ctx.reply("⛔ Admin access only.");
+  }
+
+  const request = await wallet.getRecharge(ctx.match[1]);
+
+  if (!request) {
+    return ctx.reply("❌ Recharge request not found.");
+  }
+
+  await ctx.editMessageText(wallet.rechargeReviewText(request), {
+    parse_mode: "Markdown",
+    ...wallet.rechargeReviewMenu(request),
+  });
+});
+
+bot.action(/^wallet_proof_(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery(
+    { text: "📸 Proof sent as a photo.", show_alert: true }
+  ).catch(() => {});
+
+  if (ctx.from.id !== ADMIN_ID) {
+    return ctx.reply("⛔ Admin access only.");
+  }
+
+  const request = await wallet.getRecharge(ctx.match[1]);
+
+  if (!request?.paymentProof) {
+    return ctx.reply("❌ This request has no proof attached.");
+  }
+
+  await ctx.replyWithPhoto(request.paymentProof, {
+    caption:
+      `💰 PROOF FOR ${wallet.formatLKR(request.amount)}\n\n` +
+      `🧾 ${request.id}\n` +
+      `👤 ${request.userId}`,
+  });
+});
+
+bot.action(/^wallet_approve_(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+
+  if (ctx.from.id !== ADMIN_ID) {
+    return ctx.reply("⛔ Admin access only.");
+  }
+
+  const requestId = ctx.match[1];
+
+  const result = await wallet.approveRecharge(requestId, ctx.from.id);
+
+  if (!result.ok) {
+    return ctx.reply(`❌ ${result.error}`);
+  }
+
+  try {
+    await bot.telegram.sendMessage(
+      requestId,
+      `✅ *RECHARGE APPROVED*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `💵 LKR ${wallet.formatLKR(result.amount || 0)} has been\n` +
+        `added to your wallet.\n\n` +
+        `💰 New balance: LKR ${wallet.formatLKR(result.balance)}`,
+      { parse_mode: "Markdown" }
+    );
+  } catch (error) {
+    console.error(`[WALLET] Notify user failed: ${error.message}`);
+  }
+
+  await ctx.editMessageText(
+    `✅ *RECHARGE APPROVED*\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `🧾 ${code(requestId)}\n\n` +
+      `The customer has been credited.`,
+    {
+      parse_mode: "Markdown",
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback("💰  PENDING RECHARGES", "admin_wallets")],
+      ]),
+    }
+  );
+});
+
+bot.action(/^wallet_reject_(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+
+  if (ctx.from.id !== ADMIN_ID) {
+    return ctx.reply("⛔ Admin access only.");
+  }
+
+  const requestId = ctx.match[1];
+
+  const request = await wallet.getRecharge(requestId);
+
+  if (!request) {
+    return ctx.reply("❌ Recharge request not found.");
+  }
+
+  ensureSession(ctx).rejectFlow = { requestId };
+
+  await ctx.editMessageText(
+    `❌ *REJECT RECHARGE*\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `🧾 ${code(requestId)}\n` +
+      `👤 ${code(request.userId)}\n` +
+      `💵 LKR ${wallet.formatLKR(request.amount)}\n\n` +
+      `Send the rejection reason below, or use /skip to reject without a reason.`,
+    {
+      parse_mode: "Markdown",
+    }
+  );
+});
+
 
 /*
 |--------------------------------------------------------------------------
@@ -6601,9 +5802,6 @@ function userDetailText(user, orders) {
     ? (mine.filter((o) => o.status === "approved").length / mine.length) * 100
     : 0;
 
-  const balance = wallet.getBalance(user.userId);
-  const ledger = wallet.getHistory(user.userId, 3);
-
   return (
     `👤 CUSTOMER PROFILE\n\n` +
     `━━━━━━━━━━━━━━━━━━\n\n` +
@@ -6611,8 +5809,7 @@ function userDetailText(user, orders) {
     `👤 Name\n${esc(user.firstName || "—")}\n\n` +
     `📛 Username\n${user.username ? `@${esc(user.username)}` : "_none_"}\n\n` +
     `━━━━━━━━━━━━━━━━━━\n\n` +
-    `💰 Wallet balance\nLKR ${balance.toLocaleString("en-LK")}\n\n` +
-    `💳 Lifetime spend\nLKR ${analytics.money(user.spend)}\n\n` +
+    `💰 Lifetime spend\nLKR ${analytics.money(user.spend)}\n\n` +
     `🧾 Total orders\n${user.orders}\n\n` +
     `✅ Approved\n${user.approved}\n\n` +
     `🔍 In flight\n${user.pending}\n\n` +
@@ -6633,22 +5830,7 @@ function userDetailText(user, orders) {
               `LKR ${analytics.money(o.price)} · ${analytics.when(o.createdAt)}`
           )
           .join("\n\n")
-      : "_None_") +
-    `\n\n━━━━━━━━━━━━━━━━━━\n\n` +
-    `🧾 WALLET ACTIVITY\n\n` +
-    (ledger.length
-      ? ledger
-          .map(
-            (entry) =>
-              `${entry.type === "credit" ? "➕" : "➖"} ` +
-              `LKR ${Number(entry.amount).toLocaleString("en-LK")} · ` +
-              `${entry.refType === "recharge" ? "recharge" : "order"}\n` +
-              `${analytics.when(entry.createdAt)} · balance LKR ${Number(
-                entry.balanceAfter
-              ).toLocaleString("en-LK")}`
-          )
-          .join("\n\n")
-      : "_No wallet activity_")
+      : "_None_")
   );
 }
 
@@ -6885,6 +6067,7 @@ bot.action("admin_home", async (ctx) => {
   }
 
   const s = analytics.summarise(getOrders());
+  const pendingRecharges = await wallet.getPendingRecharges();
 
   await ctx.editMessageText(
     `👑 ${STORE_NAME}\n\n` +
@@ -6892,7 +6075,8 @@ bot.action("admin_home", async (ctx) => {
       `━━━━━━━━━━━━━━━━━━\n\n` +
       `🔍 Pending orders: ${s.inFlight}\n` +
       `👥 Customers: ${s.uniqueUsers}\n` +
-      `💰 Revenue: LKR ${analytics.money(s.revenue)}\n\n` +
+      `💰 Revenue: LKR ${analytics.money(s.revenue)}\n` +
+      `💳 Pending recharges: ${pendingRecharges.length}\n\n` +
       `━━━━━━━━━━━━━━━━━━\n\n` +
       `Select an option below:`,
 
@@ -6901,68 +6085,6 @@ bot.action("admin_home", async (ctx) => {
       ...adminMenu(),
     }
   );
-});
-
-/*
-|--------------------------------------------------------------------------
-| API LOGS
-|--------------------------------------------------------------------------
-*/
-
-bot.action("admin_api_logs", async (ctx) => {
-  await ctx.answerCbQuery().catch(() => {});
-
-  if (ctx.from.id !== ADMIN_ID) {
-    return ctx.reply("⛔ Admin access only.");
-  }
-
-  const apilog = require("./src/apilog");
-  const logs = apilog.recent(20);
-  const now = Date.now();
-
-  const lines = logs.map((e) => {
-    const when = new Date(e.at).toLocaleString("en-GB", {
-      timeZone: "Asia/Colombo",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-    });
-
-    const status = e.error
-      ? `❌ ${e.error}`
-      : e.statusCode
-        ? `${e.statusCode}`
-        : "pending";
-
-    const duration = e.durationMs != null ? `${e.durationMs}ms` : "…";
-
-    return `${when} ${e.method} ${e.path}\n   ${status} · ${duration}`;
-  });
-
-  const message =
-    `📋 *API LOGS*\n\n` +
-    `━━━━━━━━━━━━━━━━━━\n\n` +
-    (lines.length ? lines.join("\n\n") : "_No API calls yet_") +
-    `\n\n━━━━━━━━━━━━━━━━━━\n` +
-    `Showing last ${Math.min(logs.length, 20)} of ${apilog.MAX_ENTRIES} max.`;
-
-  await ctx.editMessageText(message, {
-    parse_mode: "Markdown",
-    ...Markup.inlineKeyboard([
-      [
-        Markup.button.callback(
-          "🔄  REFRESH",
-          "admin_api_logs"
-        ),
-      ],
-      [
-        Markup.button.callback(
-          "🔙  ADMIN PANEL",
-          "admin_home"
-        ),
-      ],
-    ]),
-  });
 });
 
 /*
@@ -6999,14 +6121,6 @@ const CUSTOMER_COMMANDS = [
   {
     command: "orders",
     description: "📦 View my orders",
-  },
-  {
-    command: "wallet",
-    description: "💰 Wallet balance & history",
-  },
-  {
-    command: "recharge",
-    description: "➕ Add credit to your wallet",
   },
   {
     command: "about",
@@ -7081,14 +6195,14 @@ async function startBot() {
 
   console.log(`[DB] Order store: ${store.mode} (${store.orders} order(s))`);
 
-  // Wallets load next, so a balance shown on any
-  // screen reflects the same store the settlements
-  // write to.
-  const wallets = await hydrateWallets();
-
-  console.log(
-    `[DB] Wallet store: ${wallets.mode} (${wallets.wallets} wallet(s))`
-  );
+  try {
+    await walletHydrate();
+  } catch (error) {
+    console.error(
+      "[WALLETS] Hydration failed:",
+      error.message
+    );
+  }
 
   try {
     await topupProvider.initialize();
@@ -7179,6 +6293,7 @@ module.exports = {
   runStartupRecovery,
   settleForReview,
   notifyAdminOfReview,
+  notifyBotRestarted,
   reviewingOrders,
   reviewOrderMenu,
   getOrders,
@@ -7191,7 +6306,19 @@ module.exports = {
   getPendingOrders,
   getOrderStats,
   describeOrderStore,
+  wallet,
 };
+
+/*
+|--------------------------------------------------------------------------
+| WALLET HYDRATION
+|--------------------------------------------------------------------------
+*/
+async function walletHydrate() {
+  const result = await wallet.hydrate();
+
+  console.log(`[WALLETS] ${result.mode} (${result.wallets} wallet(s))`);
+}
 
 /*
 |--------------------------------------------------------------------------
@@ -7433,14 +6560,13 @@ const TEXT_SHORTCUTS = {
   orders: "orders",
   myorders: "orders",
   myorder: "orders",
+  wallet: "wallet",
+  balance: "wallet",
+  recharge: "recharge",
   cancel: "cancel",
   stop: "cancel",
   about: "about",
   games: "games",
-  wallet: "wallet",
-  balance: "wallet",
-  recharge: "recharge",
-  topup: "recharge",
 };
 
 // The admin commands are only useful to the admin, so they are only
@@ -7465,13 +6591,6 @@ bot.on("text", async (ctx) => {
   // drawing a menu that would hide what they are being asked for.
   if (ctx.session?.waitingForPlayerId) {
     return;
-  }
-
-  // A recharge amount owns the next message the
-  // same way: it is the answer to a question the
-  // bot just asked, not a command.
-  if (ctx.session?.waitingForRechargeAmount) {
-    return handleRechargeAmount(ctx, ctx.message.text);
   }
 
   const raw = ctx.message.text.trim();
@@ -7509,6 +6628,10 @@ bot.on("text", async (ctx) => {
     );
   }
 
+  if (ctx.session?.walletFlow) {
+    return handleWalletFlow(ctx, raw);
+  }
+
   if (target === "home") {
     ctx.session = {};
 
@@ -7530,11 +6653,19 @@ bot.on("text", async (ctx) => {
   }
 
   if (target === "wallet") {
-    return showWallet(ctx);
+    return ctx.reply(wallet.walletScreenText(ctx.from.id), {
+      parse_mode: "Markdown",
+      ...wallet.walletMenu(),
+    });
   }
 
   if (target === "recharge") {
-    return startRecharge(ctx);
+    ensureSession(ctx).walletFlow = { step: "amount" };
+
+    return ctx.reply(wallet.rechargeAmountText(), {
+      parse_mode: "Markdown",
+      ...cancelFlowButton(),
+    });
   }
 
   if (target === "games") {

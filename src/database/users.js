@@ -11,6 +11,11 @@
 | The document id is the Telegram id, which keeps the ids stable across a
 | migration and means an upsert can never create a second record for the
 | same person.
+|
+| Wallet fields are stored on the user document for convenience:
+|
+|   walletBalance     current balance, kept in sync by creditWallet/debitWallet
+|   walletLastUpdated ISO timestamp of the last wallet change
 */
 
 const { getDb } = require("./firestore");
@@ -27,7 +32,7 @@ function nowIso() {
  * Called on every order so the admin list and search keep working. Only the
  * id is required; the rest fills in as it becomes known.
  */
-async function upsertUser({ userId, username, firstName, lastName }) {
+async function upsertUser({ userId, username, firstName, lastName, walletBalance }) {
   const db = await getDb();
 
   if (!db) {
@@ -53,6 +58,11 @@ async function upsertUser({ userId, username, firstName, lastName }) {
 
   if (lastName !== undefined) {
     fields.lastName = lastName || null;
+  }
+
+  if (walletBalance !== undefined) {
+    fields.walletBalance = Number(walletBalance);
+    fields.walletLastUpdated = nowIso();
   }
 
   try {

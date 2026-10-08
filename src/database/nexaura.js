@@ -86,8 +86,26 @@ async function verifyEzCashDeposit(rn) {
       error: data.error?.message || "Verification failed",
     };
   } catch (error) {
-    const message =
-      error.response?.data?.error?.message || error.message || "Network error";
+    let message = "Network error";
+
+    if (error.response) {
+      const apiError = error.response.data?.error;
+      if (apiError?.message) {
+        message = apiError.message;
+      } else if (error.response.status === 422) {
+        message = "Invalid RN number. Please check and try again.";
+      } else if (error.response.status === 429) {
+        message = "Too many attempts. Please wait 30 minutes and try again.";
+      } else if (error.response.status === 400) {
+        message = "Invalid request. Please check the RN number.";
+      } else {
+        message = `Verification failed (${error.response.status})`;
+      }
+    } else if (error.code === "ECONNABORTED" || error.message?.includes("timeout")) {
+      message = "Verification timed out. Please try again.";
+    } else if (error.message) {
+      message = error.message;
+    }
 
     return { ok: false, error: message };
   }
@@ -256,4 +274,6 @@ module.exports = {
   verifyEzCashDeposit,
   getDepositStatus,
   getBalance,
+  placeTopup,
+  getTopupStatus,
 };

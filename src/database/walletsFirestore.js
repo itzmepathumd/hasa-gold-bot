@@ -309,11 +309,14 @@ async function fetchPendingRecharges(limit = 50) {
     const snapshot = await db
       .collection(RECHARGES)
       .where("status", "==", "pending")
-      .orderBy("createdAt", "asc")
       .limit(limit)
       .get();
 
-    return snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+    const results = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+
+    results.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+
+    return results;
   } catch (error) {
     console.error(`[WALLETS] Fetch pending recharges failed: ${error.message}`);
 

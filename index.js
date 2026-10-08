@@ -3950,10 +3950,6 @@ bot.action(/^review_done_(.+)$/, async (ctx) => {
   const orderId = ctx.match[1];
 
   const applied = await mutateOrder(orderId, (current) => {
-    if (isTerminalTopup(current)) {
-      return current;
-    }
-
     current.topupStatus = "topup_completed";
     current.status = "topup_completed";
     current.topupCompletedAt = new Date().toISOString();
@@ -4000,10 +3996,6 @@ bot.action(/^review_fail_(.+)$/, async (ctx) => {
   const orderId = ctx.match[1];
 
   const applied = await mutateOrder(orderId, (current) => {
-    if (isTerminalTopup(current)) {
-      return current;
-    }
-
     current.topupStatus = "topup_failed";
     current.status = "topup_failed";
     current.topupCompletedAt = new Date().toISOString();

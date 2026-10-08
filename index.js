@@ -1129,6 +1129,48 @@ async function handleWalletFlow(ctx, text) {
     });
   }
 
+  if (flow.step === "proof") {
+    if (!ctx.message.photo) {
+      return ctx.reply(
+        `❌ *Payment proof required*\n\n` +
+          `━━━━━━━━━━━━━━━━━━\n\n` +
+          `Send a screenshot of your ${wallet.METHODS[flow.method]?.label || "payment"}.\n\n` +
+          `The photo must show the amount and transaction ID.`,
+        {
+          parse_mode: "Markdown",
+          ...cancelFlowButton(),
+        }
+      );
+    }
+
+    const photo = ctx.message.photo[ctx.message.photo.length - 1];
+    const paymentProof = `https://api.telegram.org/file/bot${BOT_TOKEN}/${photo.file_path}`;
+
+    const result = await wallet.requestRecharge(
+      ctx.from.id,
+      flow.amount,
+      flow.method,
+      paymentProof
+    );
+
+    if (!result.ok) {
+      return ctx.reply(
+        `❌ *Recharge failed*\n\n` +
+          `━━━━━━━━━━━━━━━━━━\n\n` +
+          `${result.error}`,
+        {
+          parse_mode: "Markdown",
+          ...wallet.walletMenu(),
+        }
+      );
+    }
+
+    ensureSession(ctx).walletFlow = null;
+
+    return ctx.reply(wallet.rechargeSubmittedText({ ...flow, id: result.requestId }), {
+      parse_mode: "Markdown",
+      ...wallet.walletMenu(),
+    });
   }
 
   if (flow.step === "rn") {
@@ -5521,6 +5563,39 @@ bot.action(/^admin_proof_(.+)$/, async (ctx) => {
     );
   }
 
+  if (order.paymentProof.startsWith("wallet://")) {
+    return ctx.reply(
+      `💳 *PAID FROM WALLET*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `🧾 ${esc(order.id)}\n` +
+        `📦 ${esc(order.productName)}\n` +
+        `💰 LKR ${order.price.toLocaleString()}\n\n` +
+        `This order was paid using the\ncustomer's wallet balance.\n` +
+        `No screenshot proof required.`,
+      {
+        parse_mode: "Markdown",
+        ...Markup.inlineKeyboard([
+          [
+            Markup.button.callback(
+              "✅  APPROVE",
+              `approve_${order.id}`
+            ),
+            Markup.button.callback(
+              "❌  REJECT",
+              `reject_${order.id}`
+            ),
+          ],
+          [
+            Markup.button.callback(
+              "🔙  ORDER DETAILS",
+              `admin_order_${order.id}`
+            ),
+          ],
+        ]),
+      }
+    );
+  }
+
   await ctx.replyWithPhoto(
     order.paymentProof,
     {
@@ -5697,6 +5772,31 @@ bot.action(/^wallet_proof_(.+)$/, async (ctx) => {
 
   if (!request?.paymentProof) {
     return ctx.reply("❌ This request has no proof attached.");
+  }
+
+  if (
+    request.paymentProof.startsWith("auto_verified:") ||
+    request.paymentProof.startsWith("pending_verify:")
+  ) {
+    const depositId = request.paymentProof.split(":")[1];
+    const statusLabel = request.paymentProof.startsWith("auto_verified:")
+      ? "Auto Verified"
+      : "Pending Verification";
+
+    return ctx.reply(
+      `⚡ *EZ CASH AUTO VERIFY*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `💰 Amount: LKR ${wallet.formatLKR(request.amount)}\n` +
+        `🔢 RN: ${depositId}\n` +
+        `👤 ${request.userId}\n` +
+        `📅 ${new Date(request.createdAt).toLocaleString()}\n\n` +
+        `Status: ${statusLabel}\n\n` +
+        `${request.paymentProof.startsWith("auto_verified:") ? "✅ Payment was verified by Nexaura API and wallet was credited." : "⏳ Payment is pending verification with the payment network."}`,
+      {
+        parse_mode: "Markdown",
+        ...wallet.rechargeReviewMenu(request),
+      }
+    );
   }
 
   await ctx.replyWithPhoto(request.paymentProof, {

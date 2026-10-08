@@ -10,7 +10,8 @@
 | not actually been delivered.
 */
 
-const APPROVED = "approved";
+const APPROVED = "topup_completed";
+const REVENUE_STATUSES = new Set(["approved", "topup_completed"]);
 
 /*
 | A store day is a Colombo day. Timestamps are stored as UTC ISO strings,
@@ -82,12 +83,12 @@ function buildUsers(orders) {
 
     user.orders += 1;
 
-    if (order.status === APPROVED) {
+    if (REVENUE_STATUSES.has(order.status)) {
       user.approved += 1;
       user.spend += Number(order.price || 0);
     } else if (order.status === "pending_approval" || order.status === "pending_payment") {
       user.pending += 1;
-    } else if (order.status === "rejected") {
+    } else if (order.status === "rejected" || order.status === "topup_failed") {
       user.rejected += 1;
     }
 
@@ -137,11 +138,13 @@ function buildUsers(orders) {
 function summarise(orders) {
   const list = orders || [];
 
-  const approved = list.filter((o) => o.status === APPROVED);
+  const approved = list.filter((o) => REVENUE_STATUSES.has(o.status));
   const inFlight = list.filter(
     (o) => o.status === "pending_approval" || o.status === "pending_payment"
   );
-  const rejected = list.filter((o) => o.status === "rejected");
+  const rejected = list.filter(
+    (o) => o.status === "rejected" || o.status === "topup_failed"
+  );
 
   const revenue = approved.reduce((t, o) => t + Number(o.price || 0), 0);
   const inFlightValue = inFlight.reduce((t, o) => t + Number(o.price || 0), 0);
@@ -186,9 +189,15 @@ function dailyRevenue(orders, days = 7) {
   const index = new Map(out.map((d) => [d.date, d]));
 
   for (const order of orders || []) {
-    if (order.status !== APPROVED || !order.approvedAt) continue;
+    if (!REVENUE_STATUSES.has(order.status)) continue;
 
-    const bucket = index.get(localDayKey(new Date(order.approvedAt)));
+    const timestamp = order.status === "topup_completed"
+      ? order.topupCompletedAt
+      : order.approvedAt;
+
+    if (!timestamp) continue;
+
+    const bucket = index.get(localDayKey(new Date(timestamp)));
 
     if (bucket) {
       bucket.orders += 1;
@@ -208,7 +217,7 @@ function byGame(orders) {
   const totals = new Map();
 
   for (const order of orders || []) {
-    if (order.status !== APPROVED) continue;
+    if (!REVENUE_STATUSES.has(order.status)) continue;
 
     const key = order.gameName || "Unassigned";
     const row = totals.get(key) || { name: key, orders: 0, revenue: 0 };
@@ -225,7 +234,7 @@ function byProduct(orders, limit = 8) {
   const totals = new Map();
 
   for (const order of orders || []) {
-    if (order.status !== APPROVED) continue;
+    if (!REVENUE_STATUSES.has(order.status)) continue;
 
     const key = order.productName || "Unknown";
     const row = totals.get(key) || { name: key, orders: 0, revenue: 0 };

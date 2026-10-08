@@ -10,6 +10,7 @@ const anim = require("./anim");
 const botStatus = require("./status");
 const webhookServer = require("./webhookServer");
 const { Shop2TopupAdapter } = require("./src/shop2topup");
+const wallet = require("./src/wallet");
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_ID = Number(process.env.ADMIN_ID);
@@ -477,6 +478,7 @@ function replyMenu() {
   return Markup.keyboard([
     ["🕹️  Games"],
     ["📦  My Orders", "💬  Support"],
+    ["💳  Wallet", "📡  Status"],
     ["ℹ️  About", "🏠  Home"],
   ])
     .resize()
@@ -508,12 +510,13 @@ function homeMenu() {
     [Markup.button.callback(LABEL.games, "games")],
     [
       Markup.button.callback(LABEL.myOrders, "my_orders"),
-      Markup.button.callback(LABEL.support, "support"),
+      Markup.button.callback("💳  Wallet", "wallet"),
     ],
     [
-      Markup.button.callback(LABEL.about, "about"),
+      Markup.button.callback(LABEL.support, "support"),
       Markup.button.callback(LABEL.status, "status"),
     ],
+    [Markup.button.callback(LABEL.about, "about")],
     [Markup.button.callback(LABEL.home, "home")],
   ]);
 }
@@ -751,6 +754,22 @@ bot.command("status", async (ctx) => {
   await showStatus(ctx);
 });
 
+bot.command("wallet", async (ctx) => {
+  await ctx.reply(wallet.walletScreenText(ctx.from.id), {
+    parse_mode: "Markdown",
+    ...wallet.walletMenu(),
+  });
+});
+
+bot.command("recharge", async (ctx) => {
+  ensureSession(ctx).walletFlow = { step: "amount" };
+
+  await ctx.reply(wallet.rechargeAmountText(), {
+    parse_mode: "Markdown",
+    ...cancelFlowButton(),
+  });
+});
+
 /*
 |--------------------------------------------------------------------------
 | STATUS
@@ -971,6 +990,179 @@ bot.action("status_refresh", async (ctx) => {
     ...customerStatusMenu(),
   });
 });
+
+/*
+|--------------------------------------------------------------------------
+| WALLET
+|--------------------------------------------------------------------------
+*/
+bot.action("wallet", async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+
+  await ctx.editMessageText(wallet.walletScreenText(ctx.from.id), {
+    parse_mode: "Markdown",
+    ...wallet.walletMenu(),
+  });
+});
+
+bot.action("wallet_history", async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+
+  await ctx.editMessageText(wallet.walletHistoryText(ctx.from.id), {
+    parse_mode: "Markdown",
+    ...Markup.inlineKeyboard([
+      [Markup.button.callback("🔙  BACK TO WALLET", "wallet")],
+    ]),
+  });
+});
+
+bot.action("recharge", async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+
+  ensureSession(ctx).walletFlow = { step: "amount" };
+
+  await ctx.editMessageText(wallet.rechargeAmountText(), {
+    parse_mode: "Markdown",
+    ...cancelFlowButton(),
+  });
+});
+
+bot.action(/^recharge_(ez_cash|bank_transfer)$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+
+  const method = ctx.match[1];
+  const flow = ensureSession(ctx).walletFlow;
+
+  if (!flow || flow.step !== "amount") {
+    return ctx.reply("❌ Recharge flow expired. Use /recharge to start again.");
+  }
+
+  flow.method = method;
+
+  await ctx.editMessageText(wallet.rechargeProofText(method, flow.amount), {
+    parse_mode: "Markdown",
+    ...cancelFlowButton(),
+  });
+});
+
+bot.action("recharge_cancel", async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+
+  ensureSession(ctx).walletFlow = null;
+
+  await ctx.editMessageText("❌ Recharge cancelled.", {
+    ...Markup.inlineKeyboard([
+      [Markup.button.callback("🔙  BACK TO WALLET", "wallet")],
+    ]),
+  });
+});
+
+/*
+|--------------------------------------------------------------------------
+| WALLET FLOW
+|--------------------------------------------------------------------------
+*/
+async function handleWalletFlow(ctx, text) {
+  const flow = ensureSession(ctx).walletFlow;
+
+  if (!flow) {
+    return ctx.reply(wallet.walletScreenText(ctx.from.id), {
+      parse_mode: "Markdown",
+      ...wallet.walletMenu(),
+    });
+  }
+
+  if (flow.step === "amount") {
+    const parsed = Number(text.replace(/[^0-9]/g, ""));
+
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      return ctx.reply(
+        `❌ *Invalid amount*\n\n` +
+          `━━━━━━━━━━━━━━━━━━\n\n` +
+          `Send a number in LKR.\n\n` +
+          `Minimum: ${wallet.formatLKR(wallet.MIN_RECHARGE)}\n` +
+          `Maximum: ${wallet.formatLKR(wallet.MAX_SINGLE_RECHARGE)}`,
+        {
+          parse_mode: "Markdown",
+          ...cancelFlowButton(),
+        }
+      );
+    }
+
+    const validation = wallet.validateRechargeAmount(parsed);
+
+    if (!validation.ok) {
+      return ctx.reply(
+        `❌ ${validation.error}`,
+        {
+          parse_mode: "Markdown",
+          ...cancelFlowButton(),
+        }
+      );
+    }
+
+    flow.amount = validation.amount;
+    flow.step = "method";
+
+    return ctx.reply(wallet.rechargeConfirmText(flow.amount), {
+      parse_mode: "Markdown",
+      ...wallet.rechargeConfirmMenu(),
+    });
+  }
+
+  if (flow.step === "proof") {
+    if (!ctx.message.photo) {
+      return ctx.reply(
+        `❌ *Payment proof required*\n\n` +
+          `━━━━━━━━━━━━━━━━━━\n\n` +
+          `Send a screenshot of your ${wallet.METHODS[flow.method]?.label || "payment"}.\n\n` +
+          `The photo must show the amount and transaction ID.`,
+        {
+          parse_mode: "Markdown",
+          ...cancelFlowButton(),
+        }
+      );
+    }
+
+    const photo = ctx.message.photo[ctx.message.photo.length - 1];
+    const paymentProof = `https://api.telegram.org/file/bot${BOT_TOKEN}/${photo.file_path}`;
+
+    const result = await wallet.requestRecharge(
+      ctx.from.id,
+      flow.amount,
+      flow.method,
+      paymentProof
+    );
+
+    if (!result.ok) {
+      return ctx.reply(
+        `❌ *Recharge failed*\n\n` +
+          `━━━━━━━━━━━━━━━━━━\n\n` +
+          `${result.error}`,
+        {
+          parse_mode: "Markdown",
+          ...wallet.walletMenu(),
+        }
+      );
+    }
+
+    ensureSession(ctx).walletFlow = null;
+
+    return ctx.reply(wallet.rechargeSubmittedText({ ...flow, id: result.requestId }), {
+      parse_mode: "Markdown",
+      ...wallet.walletMenu(),
+    });
+  }
+
+  return ctx.reply(
+    `❌ *Invalid step*\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `Use /recharge to start again.`,
+    {
+      parse_mode: "Markdown",
+    }
+  );
+}
 /*
 |--------------------------------------------------------------------------
 | ADMIN TEXT FLOWS
@@ -1425,6 +1617,40 @@ bot.on("text", async (ctx, next) => {
   return next();
 });
 
+bot.on("text", async (ctx, next) => {
+  if (ctx.from.id !== ADMIN_ID) {
+    return next();
+  }
+
+  if (ctx.session?.rejectFlow) {
+    const { requestId } = ctx.session.rejectFlow;
+    const reason = ctx.message.text.trim().toLowerCase() === "/skip" ? null : ctx.message.text.trim();
+
+    const result = await wallet.rejectRecharge(requestId, ctx.from.id, reason);
+
+    if (!result.ok) {
+      return ctx.reply(`❌ ${result.error}`);
+    }
+
+    ensureSession(ctx).rejectFlow = null;
+
+    return ctx.reply(
+      `❌ *RECHARGE REJECTED*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `🧾 ${code(requestId)}\n\n` +
+        `The customer has been notified.`,
+      {
+        parse_mode: "Markdown",
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback("💰  PENDING RECHARGES", "admin_wallets")],
+        ]),
+      }
+    );
+  }
+
+  return next();
+});
+
 bot.action("flow_cancel", async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
 
@@ -1470,6 +1696,13 @@ bot.hears("💬  Support", async (ctx) => {
   await ctx.reply(UI.support, {
     parse_mode: "Markdown",
     ...supportMenu(),
+  });
+});
+
+bot.hears("💳  Wallet", async (ctx) => {
+  await ctx.reply(wallet.walletScreenText(ctx.from.id), {
+    parse_mode: "Markdown",
+    ...wallet.walletMenu(),
   });
 });
 
@@ -1982,8 +2215,17 @@ bot.action("confirm_order", async (ctx) => {
   ensureSession(ctx).orderId = order.id;
   ensureSession(ctx).waitingForPayment = true;
 
-  // Confirm button was tapped on the order-summary message: rewrite that
-  // message into the payment screen so the flow feels continuous.
+  const balance = wallet.getBalance(ctx.from.id);
+  const canPayWithWallet = balance >= pkg.price;
+
+  const buttons = [
+    ...(canPayWithWallet
+      ? [[Markup.button.callback("💳  PAY WITH WALLET", "pay_with_wallet")]]
+      : []),
+    [Markup.button.callback("📸  I HAVE PAID", "payment_done")],
+    [Markup.button.callback("❌  CANCEL ORDER", "cancel_order")],
+  ];
+
   await anim.revealEdit(
     ctx,
     "Creating your order",
@@ -1995,6 +2237,7 @@ bot.action("confirm_order", async (ctx) => {
       `🆔 *${esc(game.idLabel.toUpperCase())}*\n${code(order.playerId)}\n\n` +
       `💰 *TOTAL*\nLKR ${catalog.formatPrice(pkg.price)}\n\n` +
       `━━━━━━━━━━━━━━━━━━\n\n` +
+      `${canPayWithWallet ? `💳 Wallet balance: LKR ${wallet.formatLKR(balance)}\n\n` : ""}` +
       `${paymentInstructions()}\n\n` +
       `━━━━━━━━━━━━━━━━━━\n\n` +
       `📸 *PAYMENT PROOF*\n\n` +
@@ -2005,14 +2248,7 @@ bot.action("confirm_order", async (ctx) => {
       `🔐 *${STORE_NAME}*`,
     {
       parse_mode: "Markdown",
-      ...Markup.inlineKeyboard([
-        [
-          Markup.button.callback("📸  I HAVE PAID", "payment_done"),
-        ],
-        [
-          Markup.button.callback("❌  CANCEL ORDER", "cancel_order"),
-        ],
-      ]),
+      ...Markup.inlineKeyboard(buttons),
     },
     { spinner: "gear", frames: 3, delay: 300 }
   );
@@ -2089,6 +2325,82 @@ bot.action("payment_done", async (ctx) => {
     {
       text: "📸 Now send the payment screenshot.",
       show_alert: true,
+    }
+  );
+});
+
+bot.action("pay_with_wallet", async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+
+  const orderId = ctx.session?.orderId;
+
+  if (!orderId) {
+    return ctx.reply("❌ Order session expired. Please start a new order.");
+  }
+
+  const order = getOrders().find((o) => o.id === orderId);
+
+  if (!order) {
+    return ctx.reply("❌ Order not found.");
+  }
+
+  if (order.status !== "pending_payment") {
+    return ctx.reply("❌ Order is not pending payment.");
+  }
+
+  const result = await wallet.payWithWallet(
+    ctx.from.id,
+    order.price,
+    order.id,
+    "order_payment",
+    `Order ${order.id}`
+  );
+
+  if (!result.ok) {
+    return ctx.reply(
+      `❌ *Payment failed*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `${result.error}`,
+      { parse_mode: "Markdown", ...homeMenu() }
+    );
+  }
+
+  const applied = await mutateOrder(orderId, (current) => {
+    current.status = "pending_approval";
+    current.paymentMethod = "wallet";
+    current.walletTransactionId = result.transactionId;
+    current.paymentProof = `wallet://${result.transactionId}`;
+    current.paymentSubmittedAt = new Date().toISOString();
+
+    return current;
+  });
+
+  if (!applied) {
+    return ctx.reply(
+      `⚠️ *Wallet charged but order not updated*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `Your wallet was debited but the order\n` +
+        `could not be updated. Please contact support.`,
+      { parse_mode: "Markdown", ...homeMenu() }
+    );
+  }
+
+  ensureSession(ctx).waitingForPayment = false;
+
+  await ctx.editMessageText(
+    `✅ *PAYMENT CONFIRMED*\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `🧾 Order: ${code(order.id)}\n` +
+      `💰 Paid: LKR ${wallet.formatLKR(order.price)}\n` +
+      `💳 Method: Wallet\n\n` +
+      `⏳ Your order is now pending approval.\n` +
+      `You will be notified once it is processed.`,
+    {
+      parse_mode: "Markdown",
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback("📦  My Orders", "my_orders")],
+        [Markup.button.callback("🏠  Home", "home")],
+      ]),
     }
   );
 });
@@ -2987,6 +3299,89 @@ async function notifyAdminOfReview() {
   }
 }
 
+/*
+|--------------------------------------------------------------------------
+| BOT RESTART NOTIFICATION
+|--------------------------------------------------------------------------
+| Sends a friendly startup message to the admin and to any customer who
+| has an order that needs attention after a restart.
+*/
+async function notifyBotRestarted() {
+  const orders = getOrders();
+  const reviewing = reviewingOrders();
+  const pendingCustomers = new Set();
+  const customerOrderCounts = new Map();
+
+  for (const order of orders) {
+    if (
+      order.topupStatus === "topup_processing" ||
+      order.topupStatus === "ready_for_topup" ||
+      order.status === "needs_review" ||
+      (order.status === "approved" && !order.topupStatus)
+    ) {
+      pendingCustomers.add(order.userId);
+      customerOrderCounts.set(
+        order.userId,
+        (customerOrderCounts.get(order.userId) || 0) + 1
+      );
+    }
+  }
+
+  const adminText =
+    `✅ *BOT IS BACK ONLINE*\n\n` +
+    `━━━━━━━━━━━━━━━━━━\n\n` +
+    `🟢 System status: *operational*\n` +
+    `📦 Total orders: ${orders.length}\n` +
+    `⚠️ Pending review: ${reviewing.length}\n` +
+    `👥 Customers affected: ${pendingCustomers.size}\n\n` +
+    `All systems are working perfectly.\n` +
+    `Review queue will be processed shortly.`;
+
+  try {
+    await bot.telegram.sendMessage(
+      ADMIN_ID,
+      adminText,
+      {
+        parse_mode: "Markdown",
+      }
+    );
+  } catch (error) {
+    console.error(
+      "[STARTUP] Could not send admin restart notice:",
+      error.message
+    );
+  }
+
+  for (const userId of pendingCustomers) {
+    const count = customerOrderCounts.get(userId) || 0;
+    const customerText =
+      `👋 *Hello!*\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `✅ *${STORE_NAME}* is back online and\n` +
+      `working perfectly!\n\n` +
+      `📦 You have *${count}* order(s) that we are\n` +
+      `currently processing.\n\n` +
+      `⏳ We will update you as soon as\n` +
+      `your top-up is complete.\n\n` +
+      `Thank you for your patience! 🙏`;
+
+    try {
+      await bot.telegram.sendMessage(
+        userId,
+        customerText,
+        {
+          parse_mode: "Markdown",
+        }
+      );
+    } catch (error) {
+      console.error(
+        `[STARTUP] Could not send restart notice to user ${userId}:`,
+        error.message
+      );
+    }
+  }
+}
+
 /**
  * Orders waiting for a human decision.
  */
@@ -3746,14 +4141,14 @@ function adminMenu() {
     ],
     [
       Markup.button.callback(
-        "📦  ALL ORDERS",
-        "admin_all_orders"
+        "📊  SALES STATISTICS",
+        "admin_stats"
       ),
     ],
     [
       Markup.button.callback(
-        "📊  SALES STATISTICS",
-        "admin_stats"
+        "💳  WALLET",
+        "admin_wallets"
       ),
     ],
     [
@@ -5089,6 +5484,141 @@ bot.action("admin_status_refresh", async (ctx) => {
   });
 });
 
+/*
+|--------------------------------------------------------------------------
+| WALLET
+|--------------------------------------------------------------------------
+*/
+bot.action("admin_wallets", async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+
+  if (ctx.from.id !== ADMIN_ID) {
+    return ctx.reply("⛔ Admin access only.");
+  }
+
+  const pending = await wallet.getPendingRecharges();
+
+  await ctx.editMessageText(wallet.pendingRechargesText(pending), {
+    parse_mode: "Markdown",
+    ...wallet.pendingRechargesMenu(pending),
+  });
+});
+
+bot.action(/^wallet_recharge_(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+
+  if (ctx.from.id !== ADMIN_ID) {
+    return ctx.reply("⛔ Admin access only.");
+  }
+
+  const request = await wallet.getRecharge(ctx.match[1]);
+
+  if (!request) {
+    return ctx.reply("❌ Recharge request not found.");
+  }
+
+  await ctx.editMessageText(wallet.rechargeReviewText(request), {
+    parse_mode: "Markdown",
+    ...wallet.rechargeReviewMenu(request),
+  });
+});
+
+bot.action(/^wallet_proof_(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery(
+    { text: "📸 Proof sent as a photo.", show_alert: true }
+  ).catch(() => {});
+
+  if (ctx.from.id !== ADMIN_ID) {
+    return ctx.reply("⛔ Admin access only.");
+  }
+
+  const request = await wallet.getRecharge(ctx.match[1]);
+
+  if (!request?.paymentProof) {
+    return ctx.reply("❌ This request has no proof attached.");
+  }
+
+  await ctx.replyWithPhoto(request.paymentProof, {
+    caption:
+      `💰 PROOF FOR ${wallet.formatLKR(request.amount)}\n\n` +
+      `🧾 ${request.id}\n` +
+      `👤 ${request.userId}`,
+  });
+});
+
+bot.action(/^wallet_approve_(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+
+  if (ctx.from.id !== ADMIN_ID) {
+    return ctx.reply("⛔ Admin access only.");
+  }
+
+  const requestId = ctx.match[1];
+
+  const result = await wallet.approveRecharge(requestId, ctx.from.id);
+
+  if (!result.ok) {
+    return ctx.reply(`❌ ${result.error}`);
+  }
+
+  try {
+    await bot.telegram.sendMessage(
+      requestId,
+      `✅ *RECHARGE APPROVED*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `💵 LKR ${wallet.formatLKR(result.amount || 0)} has been\n` +
+        `added to your wallet.\n\n` +
+        `💰 New balance: LKR ${wallet.formatLKR(result.balance)}`,
+      { parse_mode: "Markdown" }
+    );
+  } catch (error) {
+    console.error(`[WALLET] Notify user failed: ${error.message}`);
+  }
+
+  await ctx.editMessageText(
+    `✅ *RECHARGE APPROVED*\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `🧾 ${code(requestId)}\n\n` +
+      `The customer has been credited.`,
+    {
+      parse_mode: "Markdown",
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback("💰  PENDING RECHARGES", "admin_wallets")],
+      ]),
+    }
+  );
+});
+
+bot.action(/^wallet_reject_(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+
+  if (ctx.from.id !== ADMIN_ID) {
+    return ctx.reply("⛔ Admin access only.");
+  }
+
+  const requestId = ctx.match[1];
+
+  const request = await wallet.getRecharge(requestId);
+
+  if (!request) {
+    return ctx.reply("❌ Recharge request not found.");
+  }
+
+  ensureSession(ctx).rejectFlow = { requestId };
+
+  await ctx.editMessageText(
+    `❌ *REJECT RECHARGE*\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `🧾 ${code(requestId)}\n` +
+      `👤 ${code(request.userId)}\n` +
+      `💵 LKR ${wallet.formatLKR(request.amount)}\n\n` +
+      `Send the rejection reason below, or use /skip to reject without a reason.`,
+    {
+      parse_mode: "Markdown",
+    }
+  );
+});
+
 
 /*
 |--------------------------------------------------------------------------
@@ -5537,6 +6067,7 @@ bot.action("admin_home", async (ctx) => {
   }
 
   const s = analytics.summarise(getOrders());
+  const pendingRecharges = await wallet.getPendingRecharges();
 
   await ctx.editMessageText(
     `👑 ${STORE_NAME}\n\n` +
@@ -5544,7 +6075,8 @@ bot.action("admin_home", async (ctx) => {
       `━━━━━━━━━━━━━━━━━━\n\n` +
       `🔍 Pending orders: ${s.inFlight}\n` +
       `👥 Customers: ${s.uniqueUsers}\n` +
-      `💰 Revenue: LKR ${analytics.money(s.revenue)}\n\n` +
+      `💰 Revenue: LKR ${analytics.money(s.revenue)}\n` +
+      `💳 Pending recharges: ${pendingRecharges.length}\n\n` +
       `━━━━━━━━━━━━━━━━━━\n\n` +
       `Select an option below:`,
 
@@ -5664,6 +6196,15 @@ async function startBot() {
   console.log(`[DB] Order store: ${store.mode} (${store.orders} order(s))`);
 
   try {
+    await walletHydrate();
+  } catch (error) {
+    console.error(
+      "[WALLETS] Hydration failed:",
+      error.message
+    );
+  }
+
+  try {
     await topupProvider.initialize();
   } catch (error) {
     console.error(
@@ -5752,6 +6293,7 @@ module.exports = {
   runStartupRecovery,
   settleForReview,
   notifyAdminOfReview,
+  notifyBotRestarted,
   reviewingOrders,
   reviewOrderMenu,
   getOrders,
@@ -5764,7 +6306,19 @@ module.exports = {
   getPendingOrders,
   getOrderStats,
   describeOrderStore,
+  wallet,
 };
+
+/*
+|--------------------------------------------------------------------------
+| WALLET HYDRATION
+|--------------------------------------------------------------------------
+*/
+async function walletHydrate() {
+  const result = await wallet.hydrate();
+
+  console.log(`[WALLETS] ${result.mode} (${result.wallets} wallet(s))`);
+}
 
 /*
 |--------------------------------------------------------------------------
@@ -6006,6 +6560,9 @@ const TEXT_SHORTCUTS = {
   orders: "orders",
   myorders: "orders",
   myorder: "orders",
+  wallet: "wallet",
+  balance: "wallet",
+  recharge: "recharge",
   cancel: "cancel",
   stop: "cancel",
   about: "about",
@@ -6014,7 +6571,7 @@ const TEXT_SHORTCUTS = {
 
 // The admin commands are only useful to the admin, so they are only
 // advertised to them. Every command here has a real handler.
-const CUSTOMER_COMMANDS_TEXT = `/start · /games · /orders · /about · /support · /cancel`;
+const CUSTOMER_COMMANDS_TEXT = `/start · /games · /orders · /wallet · /recharge · /about · /support · /cancel`;
 const ADMIN_COMMANDS_TEXT = `/admin · /review`;
 
 function knownCommands(ctx) {
@@ -6071,6 +6628,10 @@ bot.on("text", async (ctx) => {
     );
   }
 
+  if (ctx.session?.walletFlow) {
+    return handleWalletFlow(ctx, raw);
+  }
+
   if (target === "home") {
     ctx.session = {};
 
@@ -6089,6 +6650,22 @@ bot.on("text", async (ctx) => {
 
   if (target === "orders") {
     return sendMyOrders(ctx, false);
+  }
+
+  if (target === "wallet") {
+    return ctx.reply(wallet.walletScreenText(ctx.from.id), {
+      parse_mode: "Markdown",
+      ...wallet.walletMenu(),
+    });
+  }
+
+  if (target === "recharge") {
+    ensureSession(ctx).walletFlow = { step: "amount" };
+
+    return ctx.reply(wallet.rechargeAmountText(), {
+      parse_mode: "Markdown",
+      ...cancelFlowButton(),
+    });
   }
 
   if (target === "games") {

@@ -24,7 +24,7 @@ const MAX_SINGLE_RECHARGE = 50000;
 const MAX_DAILY_RECHARGE = 100000;
 
 const Markup = {
-  inlineKeyboard: (buttons) => ({ inline_keyboard: buttons }),
+  inlineKeyboard: (buttons) => ({ reply_markup: { inline_keyboard: buttons } }),
   button: {
     callback: (text, data) => ({ text, callback_data: data }),
   },

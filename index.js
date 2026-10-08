@@ -11,6 +11,7 @@ const botStatus = require("./status");
 const webhookServer = require("./webhookServer");
 const { Shop2TopupAdapter } = require("./src/shop2topup");
 const wallet = require("./src/wallet");
+const nexaura = require("./src/database/nexaura");
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_ID = Number(process.env.ADMIN_ID);

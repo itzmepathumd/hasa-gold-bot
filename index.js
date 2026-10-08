@@ -1033,11 +1033,12 @@ bot.action(/^recharge_(ez_cash|bank_transfer)$/, async (ctx) => {
   const method = ctx.match[1];
   const flow = ensureSession(ctx).walletFlow;
 
-  if (!flow || flow.step !== "amount") {
+  if (!flow || flow.step !== "method") {
     return ctx.reply("❌ Recharge flow expired. Use /recharge to start again.");
   }
 
   flow.method = method;
+  flow.step = "proof";
 
   await ctx.editMessageText(wallet.rechargeProofText(method, flow.amount), {
     parse_mode: "Markdown",

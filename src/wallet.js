@@ -264,10 +264,9 @@ function rechargeAutoVerifyText(amount) {
   return (
     `⚡ *EZ CASH AUTO VERIFY*\n\n` +
     `━━━━━━━━━━━━━━━━━━\n\n` +
-    `Amount: *LKR ${formatLKR(amount)}*\n\n` +
     `📱 *EZ Cash Number:* \`0741635465\`\n\n` +
     `Send the *14-digit RN number* from your\neZ Cash payment SMS.\n\n` +
-    `We will verify it instantly and credit\nyour wallet automatically.`
+    `We will verify it instantly and credit\nthe exact amount automatically.`
   );
 }
 

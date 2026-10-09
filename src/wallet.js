@@ -262,11 +262,31 @@ function rechargeProofText(method, amount) {
 
 function rechargeAutoVerifyText(amount) {
   return (
-    `⚡ *EZ CASH AUTO VERIFY*\n\n` +
-    `━━━━━━━━━━━━━━━━━━\n\n` +
-    `📱 *EZ Cash Number:* \`0741635465\`\n\n` +
-    `Send the *14-digit RN number* from your\neZ Cash payment SMS.\n\n` +
-    `We will verify it instantly and credit\nthe exact amount automatically.`
+    `⚡ eZ CASH AUTO VERIFICATION\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `💳 PAYMENT DETAILS\n\n` +
+    `📱 eZ Cash Number\n` +
+    `"074 163 5465"\n\n` +
+    `💰 SERVICE FEE: Rs. 20 EXTRA\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `📌 HOW TO PAY\n\n` +
+    `1️⃣ Send your payment to the eZ Cash number above.\n\n` +
+    `2️⃣ Add Rs. 20 service fee to your top-up amount.\n\n` +
+    `3️⃣ Find the 14-digit RN Number in your eZ Cash payment SMS.\n\n` +
+    `4️⃣ Send your RN Number here to verify your payment automatically.\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `⚠️ සැ.යු  👇\n\n` +
+    `🔹 ඔබ ගෙවිය යුතු Top-up මුදලට අමතරව රු. 20ක සේවා ගාස්තුවක් එකතු කර ගෙවන්න.\n\n` +
+    `🔹 අමතර රු. 20 නොගෙවන්නේ නම්, එම ගාස්තුව ඔබ එවූ මුදලින් අඩු කරනු ලැබේ. එවිට Top-up සඳහා ලැබෙන මුදල අඩු වේ.\n\n` +
+    `📱 RN Number එක අනිවාර්යයි!\n\n` +
+    `ඔබගේ ගෙවීම තහවුරු කිරීමට eZ Cash SMS එකේ සඳහන් අංක 14ක RN Number එක අනිවාර්යයෙන් අවශ්‍ය වේ.\n\n` +
+    `❌ RN Number එක නොමැතිව ඔබගේ ගෙවීම තහවුරු කළ නොහැක.\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `⚡ AUTO VERIFICATION\n\n` +
+    `✅ Automatic payment verification\n` +
+    `💎 Automatic balance credit\n` +
+    `🔒 RN Number required as payment proof\n\n` +
+    `🚀 Fast • Easy • Automatic`
   );
 }
 

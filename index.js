@@ -1155,10 +1155,7 @@ bot.action("recharge_ez_cash_auto", async (ctx) => {
   ensureSession(ctx).walletFlow = { step: "rn" };
 
   await ctx.editMessageText(
-    `⚡ *EZ CASH AUTO VERIFY*\n\n` +
-      `━━━━━━━━━━━━━━━━━━\n\n` +
-      `Send the *14-digit RN number* from your\neZ Cash payment SMS.\n\n` +
-      `We will verify it and credit the exact\namount automatically.`,
+    wallet.rechargeAutoVerifyText(0),
     {
       parse_mode: "Markdown",
       ...Markup.inlineKeyboard([

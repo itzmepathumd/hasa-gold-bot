@@ -3955,11 +3955,15 @@ async function sendMyOrders(ctx, isEdit) {
     .reverse()
     .slice(0, 10)
     .forEach((order) => {
+      const paymentMethod = order.paymentMethod
+        ? order.paymentMethod.charAt(0).toUpperCase() + order.paymentMethod.slice(1)
+        : "Not set";
       message +=
         `🧾 *${esc(order.id)}*\n` +
         `📦 ${esc(order.productName)}\n` +
         `🆔 Player ID: ${code(order.playerId)}\n` +
         `💰 LKR ${Number(order.price).toLocaleString()}\n` +
+        `💳 ${paymentMethod}\n` +
         `${statusBadge(order.status)}\n\n`;
     });
 
@@ -4034,11 +4038,15 @@ function reviewQueueText() {
     `⚠️ ${reviewing.length} order(s) need a decision:\n\n`;
 
   for (const order of reviewing.slice(0, 10)) {
+    const paymentMethod = order.paymentMethod
+      ? order.paymentMethod.charAt(0).toUpperCase() + order.paymentMethod.slice(1)
+      : "Not set";
     text +=
       `🧾 ${esc(order.id)}\n` +
       `🎮 ${esc(order.gameName)}\n` +
       `📦 ${esc(order.productName)}\n` +
       `🆔 ${code(order.playerId)}\n` +
+      `💳 ${paymentMethod}\n` +
       `💬 ${esc(order.topupError || "not settled by the provider")}\n\n`;
   }
 
@@ -5518,11 +5526,15 @@ for approval.`,
     `━━━━━━━━━━━━━━━━━━\n\n`;
 
   for (const order of pending.slice(0, 10)) {
+    const paymentMethod = order.paymentMethod
+      ? order.paymentMethod.charAt(0).toUpperCase() + order.paymentMethod.slice(1)
+      : "Not set";
     message +=
       `🧾 ${esc(order.id)}\n` +
       `📦 ${esc(order.productName)}\n` +
       `🆔 ${code(order.playerId)}\n` +
-      `💰 LKR ${order.price.toLocaleString()}\n\n`;
+      `💰 LKR ${order.price.toLocaleString()}\n` +
+      `💳 ${paymentMethod}\n\n`;
   }
 
   const buttons = pending
@@ -5585,6 +5597,7 @@ bot.action(/^admin_order_(.+)$/, async (ctx) => {
     `📦 Product: ${order.productName}\n` +
     `🆔 Player ID: \`${order.playerId}\`\n` +
     `💰 Amount: LKR ${order.price.toLocaleString()}\n` +
+    `💳 ${order.paymentMethod ? order.paymentMethod.charAt(0).toUpperCase() + order.paymentMethod.slice(1) : "Not set"}\n` +
     `👤 Customer: ${customer}\n\n` +
     `${statusBadge(order.status)}`;
 
@@ -5752,10 +5765,14 @@ bot.action("admin_all_orders", async (ctx) => {
     `━━━━━━━━━━━━━━━━━━\n\n`;
 
   for (const order of latest) {
+    const paymentMethod = order.paymentMethod
+      ? order.paymentMethod.charAt(0).toUpperCase() + order.paymentMethod.slice(1)
+      : "Not set";
     message +=
       `🧾 ${esc(order.id)}\n` +
       `📦 ${esc(order.productName)}\n` +
       `💰 LKR ${order.price.toLocaleString()}\n` +
+      `💳 ${paymentMethod}\n` +
       `${statusBadge(order.status)}\n\n`;
   }
 

@@ -4481,11 +4481,9 @@ async function sendMyOrders(ctx, isEdit) {
     .reverse()
     .slice(0, 10)
     .forEach((order) => {
-      const paymentMethod = order.paymentMethod
-        ? order.paymentMethod.charAt(0).toUpperCase() + order.paymentMethod.slice(1)
-        : "Not set";
+      const paymentMethod = paymentMethodLabel(order);
       message +=
-        `🧾 *${esc(order.id)}*\n` +
+        `🧾 ${code(order.id)}\n` +
         `📦 ${esc(order.productName)}\n` +
         `🆔 Player ID: ${code(order.playerId)}\n` +
         `💰 LKR ${Number(order.price).toLocaleString()}\n` +
@@ -6175,7 +6173,7 @@ bot.action(/^admin_order_(.+)$/, async (ctx) => {
     `📦 Product: ${order.productName}\n` +
     `🆔 Player ID: \`${order.playerId}\`\n` +
     `💰 Amount: LKR ${order.price.toLocaleString()}\n` +
-    `💳 ${order.paymentMethod ? order.paymentMethod.charAt(0).toUpperCase() + order.paymentMethod.slice(1) : "Not set"}\n` +
+    `💳 ${paymentMethodLabel(order)}\n` +
     `👤 Customer: ${customer}\n\n` +
     `${statusBadge(order.status)}`;
 

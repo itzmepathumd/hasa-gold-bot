@@ -324,6 +324,36 @@ async function logTopupAttempt(orderNumber, entry) {
   }
 }
 
+/**
+ * Expire orders stuck in pending_payment beyond the configured timeout.
+ * Only affects pending_payment status; pending_approval orders are left alone.
+ *
+ * @param {number} timeoutHours - Hours after which an order expires (default 24)
+ * @returns {Promise<number>} Number of orders expired
+ */
+async function expirePendingPaymentOrders(timeoutHours = 24) {
+  const db = await getDb();
+
+  if (!db) {
+    return 0;
+  }
+
+  const { rows } = await db.query(
+    `UPDATE orders
+     SET status = 'expired',
+         updated_at = NOW()
+     WHERE status = 'pending_payment'
+       AND created_at < NOW() - INTERVAL '${timeoutHours} hours'
+     RETURNING order_number`
+  );
+
+  if (rows.length > 0) {
+    console.log(`[ORDER-EXPIRY] Expired ${rows.length} pending_payment order(s): ${rows.map(r => r.order_number).join(', ')}`);
+  }
+
+  return rows.length;
+}
+
 module.exports = {
   COLLECTION,
   fetchAllOrders,
@@ -334,4 +364,5 @@ module.exports = {
   createOrder,
   updateOrder,
   logTopupAttempt,
+  expirePendingPaymentOrders,
 };

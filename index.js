@@ -13,6 +13,8 @@ const { Shop2TopupAdapter } = require("./src/shop2topup");
 const wallet = require("./src/wallet");
 const payments = require("./src/database/payments");
 const nexaura = require("./src/database/nexaura");
+const { expirePendingPaymentOrders } = require("./src/database/pgOrders");
+const maintenance = require("./maintenance");
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_ID = Number(process.env.ADMIN_ID);
@@ -104,6 +106,30 @@ bot.use(async (ctx, next) => {
   // Updates only arrive while the bot is connected and polling, so their
   // arrival is the cheapest honest proof Telegram is still talking to us.
   botStatus.record("telegram", true, "polling");
+
+  /*
+  | Maintenance mode. Placed after logging and before the typing indicator, so
+  | a paused shop never shows activity to a customer it is refusing to serve.
+  | The admin is exempt on every path, which keeps the panel that turns the
+  | mode off reachable; nothing else is served, which is what makes the pause
+  | total rather than advisory.
+  */
+  if (maintenance.isEnabled() && ctx.from?.id !== ADMIN_ID) {
+    // An unanswered callback keeps its spinner turning on the customer's
+    // screen, so it is settled before the refusal.
+    if (ctx.callbackQuery) {
+      await ctx.answerCbQuery().catch(() => {});
+    }
+
+    await ctx
+      .reply(UI.maintenance, {
+        parse_mode: "Markdown",
+        ...maintenanceMenu(),
+      })
+      .catch(() => {});
+
+    return;
+  }
 
   // Show the real "bot is typing..." indicator for anything that is not an
   // inline button press (those get their own spinner edit).
@@ -627,6 +653,20 @@ unavailable right now.
 Please check back soon or
 contact support for details.`,
 
+  maintenance: `🛠 *BOT UNAVAILABLE*
+
+━━━━━━━━━━━━━━━━━━
+
+⏸ The bot is currently under
+maintenance and is not
+taking orders right now.
+
+🕒 We are working on it.
+Please check back soon.
+
+💬 For urgent help, contact
+support using the buttons below.`,
+
   packagePaused: `⏸ *PACKAGE UNAVAILABLE*
 
 ━━━━━━━━━━━━━━━━━━
@@ -794,6 +834,23 @@ function supportMenu() {
       Markup.button.callback(LABEL.home, "home"),
     ],
     [Markup.button.callback(LABEL.about, "about")],
+  ]);
+}
+
+/*
+| Shown instead of every keyboard while maintenance mode is on. The games
+| and home buttons either way cannot open their screens, so only the support
+| routes are offered, plus a retry that reaches the middleware again.
+*/
+function maintenanceMenu() {
+  return Markup.inlineKeyboard([
+    [
+      Markup.button.url("💬  TELEGRAM SUPPORT", `https://t.me/${DEVELOPER.telegram}`),
+    ],
+    [
+      Markup.button.url("📞  WHATSAPP", `https://wa.me/${DEVELOPER.whatsapp.replace(/\D/g, "")}`),
+    ],
+    [Markup.button.callback("🔄  TRY AGAIN", "maintenance_retry")],
   ]);
 }
 
@@ -982,6 +1039,23 @@ async function showStatus(ctx) {
 |--------------------------------------------------------------------------
 */
 bot.action("home", async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+
+  ctx.session = {};
+
+  await ctx.editMessageText(UI.home, {
+    parse_mode: "Markdown",
+    ...homeMenu(),
+  });
+});
+
+/*
+| The retry button on the maintenance screen. It is only reached once
+| maintenance is over, because while it is on the middleware answers the
+| callback first and this handler never runs. When the shop re-opens, the
+| same button lands the customer on the home screen instead of doing nothing.
+*/
+bot.action("maintenance_retry", async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
 
   ctx.session = {};
@@ -4453,6 +4527,48 @@ bot.command("admin", async (ctx) => {
   });
 });
 
+/*
+| /maintenance is the keyboard-free version of the panel button, for the
+| case where the panel is not to hand and the shop needs pausing now.
+*/
+bot.command("maintenance", async (ctx) => {
+  if (ctx.from.id !== ADMIN_ID) {
+    return ctx.reply("⛔ Admin access only.");
+  }
+
+  const arg = String(ctx.message.text || "")
+    .split(/\s+/)[1]
+    ?.toLowerCase();
+
+  /*
+  | No argument flips the flag; an explicit one sets it. Both forms are
+  | accepted because "maintenance on" from a shell habit is the same request
+  | as a bare /maintenance tap.
+  */
+  let result;
+
+  if (arg === "on" || arg === "off") {
+    result = await maintenance.setEnabled(arg === "on");
+  } else {
+    result = await maintenance.toggle();
+  }
+
+  const state = result.enabled ? "🔴 ON" : "🟢 OFF";
+
+  await ctx.reply(
+    `🛠 *MAINTENANCE MODE*\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `Status: *${state}*\n\n` +
+      (result.enabled
+        ? `Customers now see the "bot\nunavailable" screen. Only you\ncan use the bot.`
+        : `Customers can use the bot again.`) +
+      `\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `Usage: \`/maintenance\` to flip,\n\`/maintenance on\` or\n\`/maintenance off\` to set.`,
+    { parse_mode: "Markdown" }
+  );
+});
+
 bot.command("review", async (ctx) => {
   if (ctx.from.id !== ADMIN_ID) {
     return ctx.reply("⛔ Admin access only.");
@@ -4874,6 +4990,14 @@ Attempts: ${order.topupAttempts || 0} of ${TOPUP_MAX_ATTEMPTS}`
 */
 function adminMenu() {
   return Markup.inlineKeyboard([
+    [
+      Markup.button.callback(
+        maintenance.isEnabled()
+          ? "🟢  MAINTENANCE MODE — ON"
+          : "🔴  MAINTENANCE MODE — OFF",
+        "admin_maintenance"
+      ),
+    ],
     [
       Markup.button.callback(
         "🔍  PENDING ORDERS",
@@ -7135,6 +7259,29 @@ bot.action("admin_user_search", async (ctx) => {
 |--------------------------------------------------------------------------
 */
 
+/*
+| The maintenance toggle re-renders the panel as well, so the body is a
+| function both handlers share rather than a string only one of them can
+| rebuild.
+*/
+async function adminHomeText() {
+  const s = analytics.summarise(getOrders());
+  const pendingRecharges = await wallet.getPendingRecharges();
+
+  return (
+    `👑 ${STORE_NAME}\n\n` +
+    `🛠️ ADMIN PANEL\n\n` +
+    `━━━━━━━━━━━━━━━━━━\n\n` +
+    `🔍 Pending orders: ${s.inFlight}\n` +
+    `👥 Customers: ${s.uniqueUsers}\n` +
+    `💰 Revenue: LKR ${analytics.money(s.revenue)}\n` +
+    `💳 Pending recharges: ${pendingRecharges.length}\n` +
+    `🛠 Maintenance: ${maintenance.isEnabled() ? "🔴 ON (customers paused)" : "🟢 OFF (customers served)"}\n\n` +
+    `━━━━━━━━━━━━━━━━━━\n\n` +
+    `Select an option below:`
+  );
+}
+
 bot.action("admin_home", async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
 
@@ -7142,25 +7289,47 @@ bot.action("admin_home", async (ctx) => {
     return ctx.reply("⛔ Admin access only.");
   }
 
-  const s = analytics.summarise(getOrders());
-  const pendingRecharges = await wallet.getPendingRecharges();
+  await ctx.editMessageText(await adminHomeText(), {
+    parse_mode: "Markdown",
+    ...adminMenu(),
+  });
+});
 
-  await ctx.editMessageText(
-    `👑 ${STORE_NAME}\n\n` +
-      `🛠️ ADMIN PANEL\n\n` +
-      `━━━━━━━━━━━━━━━━━━\n\n` +
-      `🔍 Pending orders: ${s.inFlight}\n` +
-      `👥 Customers: ${s.uniqueUsers}\n` +
-      `💰 Revenue: LKR ${analytics.money(s.revenue)}\n` +
-      `💳 Pending recharges: ${pendingRecharges.length}\n\n` +
-      `━━━━━━━━━━━━━━━━━━\n\n` +
-      `Select an option below:`,
+/*
+|--------------------------------------------------------------------------
+| MAINTENANCE MODE
+|--------------------------------------------------------------------------
+| Pauses the shop for everyone but the admin. The middleware gate reads the
+| same module flag this handler writes, so the very next update from a
+| customer is answered with the maintenance screen.
+*/
+bot.action("admin_maintenance", async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
 
-    {
-      parse_mode: "Markdown",
-      ...adminMenu(),
-    }
+  if (ctx.from.id !== ADMIN_ID) {
+    return ctx.reply("⛔ Admin access only.");
+  }
+
+  const result = await maintenance.toggle();
+
+  console.log(
+    `[MAINTENANCE] ${result.previous ? "ON" : "OFF"} → ` +
+      `${result.enabled ? "ON" : "OFF"} by admin ${ctx.from.id}` +
+      `${result.persisted ? "" : " (not persisted — no database)"}`
   );
+
+  // Tapping the button on an old panel leaves a message Telegram no longer
+  // accepts edits for, so the panel is re-sent rather than left stale.
+  const panel = {
+    parse_mode: "Markdown",
+    ...adminMenu(),
+  };
+
+  await ctx
+    .editMessageText(await adminHomeText(), panel)
+    .catch(async () => {
+      await ctx.reply(await adminHomeText(), panel);
+    });
 });
 
 /*
@@ -7220,6 +7389,10 @@ const ADMIN_COMMANDS = [
   {
     command: "admin",
     description: "👑 Admin panel",
+  },
+  {
+    command: "maintenance",
+    description: "🛠 Pause the bot for customers",
   },
   {
     command: "review",
@@ -7294,6 +7467,21 @@ async function startBot() {
   } catch (error) {
     console.error(
       "[CATALOG] Hydration failed:",
+      error.message
+    );
+  }
+
+  // Before the bot accepts a single update, so a shop left paused before a
+  // restart comes back paused rather than silently re-opening.
+  try {
+    const state = await maintenance.hydrate();
+
+    console.log(
+      `[MAINTENANCE] ${state.mode === "on" ? "ON — customers are paused" : "OFF — customers are served"}`
+    );
+  } catch (error) {
+    console.error(
+      "[MAINTENANCE] Hydration failed:",
       error.message
     );
   }
@@ -7373,6 +7561,27 @@ async function startBot() {
   // number in the status panel describes serving time rather than boot time.
   botStatus.markBoot();
 
+  // Schedule periodic expiry of orders awaiting payment proof.
+  // Only pending_payment orders are expired; pending_approval orders wait for admin.
+  const ORDER_PROOF_TIMEOUT_HOURS = Number(process.env.ORDER_PROOF_TIMEOUT_HOURS) || 24;
+  const EXPIRY_CHECK_INTERVAL_MS = 15 * 60 * 1000; // every 15 minutes
+
+  async function runExpiryCheck() {
+    try {
+      const expired = await expirePendingPaymentOrders(ORDER_PROOF_TIMEOUT_HOURS);
+      if (expired > 0) {
+        console.log(`[ORDER-EXPIRY] Scheduled check expired ${expired} order(s)`);
+      }
+    } catch (error) {
+      console.error("[ORDER-EXPIRY] Scheduled check failed:", error.message);
+    }
+  }
+
+  // Run once on startup, then on interval. The handle is the module-scope one
+  // shutdown() cancels, so this is not a second timer the sweep cannot reach.
+  await runExpiryCheck();
+  expiryTimer = setInterval(runExpiryCheck, EXPIRY_CHECK_INTERVAL_MS);
+
   console.log(
     `🚀 ${STORE_NAME} bot is running (${transport})...`
   );
@@ -7428,9 +7637,25 @@ async function walletHydrate() {
 |--------------------------------------------------------------------------
 | The provider lookups are timers the shop scheduled itself, so they are
 | cancelled on the way out rather than left to fire into a closing process.
+| The order-expiry sweep is also held at module scope for shutdown to cancel.
 */
 
 let isShuttingDown = false;
+
+/*
+| The order-expiry sweep is a self-scheduled timer, so it is held at module
+| scope for shutdown to cancel rather than wrapped around shutdown itself.
+*/
+let expiryTimer = null;
+
+async function stopOrderExpirySweep() {
+  if (!expiryTimer) {
+    return;
+  }
+
+  clearInterval(expiryTimer);
+  expiryTimer = null;
+}
 
 async function shutdown(signal) {
   if (isShuttingDown) {
@@ -7452,6 +7677,8 @@ async function shutdown(signal) {
     await webhookServer.close(webhookHandle);
     webhookHandle = null;
   }
+
+  await stopOrderExpirySweep();
 
   // Pending provider lookups must not outlive the process.
   stopTopupResolutions();

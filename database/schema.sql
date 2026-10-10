@@ -213,6 +213,7 @@ CREATE TABLE IF NOT EXISTS orders (
             'approved',
             'rejected',
             'cancelled',
+            'expired',
             'ready_for_topup',
             'topup_processing',
             'topup_completed',
@@ -952,5 +953,9 @@ ON CONFLICT (provider) DO NOTHING;
 INSERT INTO settings (key, value)
 VALUES
     ('store_name', '"HASA GOLD STORE"'::jsonb),
-    ('catalog_version', '1'::jsonb)
+    ('catalog_version', '1'::jsonb),
+    -- Maintenance mode: when true the bot answers non-admin updates with the
+    -- maintenance screen instead of serving them. Seeded false so a fresh
+    -- deployment opens normally, and flipped from the admin panel at runtime.
+    ('maintenance_mode', 'false'::jsonb)
 ON CONFLICT (key) DO NOTHING;

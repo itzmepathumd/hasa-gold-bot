@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "test": "node selftest.js && node flowtest.js && node analytest.js && node deadscan.js && node animtest.js && node abouttest.js && node statustest.js && node webhooktest.js && node subcatTest.js && node topupapitest.js && node topuptest.js && node walletflowtest.js && node tests/databasetest.js && node tests/schematest.js",
+    "test": "node selftest.js && node flowtest.js && node analytest.js && node deadscan.js && node animtest.js && node abouttest.js && node statustest.js && node webhooktest.js && node subcatTest.js && node topupapitest.js && node topuptest.js && node walletflowtest.js && node maintenancetest.js && node tests/databasetest.js && node tests/schematest.js",
     "db:schema": "psql \"$SUPABASE_DB_URL\" -f database/schema.sql",
     "db:check": "node scripts/db-check.js",
     "db:seed-catalog": "node scripts/seed-catalog.js"

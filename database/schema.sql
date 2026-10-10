@@ -250,6 +250,31 @@ CREATE INDEX IF NOT EXISTS orders_needing_attention_idx
     WHERE topup_status IN ('ready_for_topup', 'topup_processing', 'needs_review');
 
 -- ---------------------------------------------------------------------------
+-- SCHEMA UPGRADES
+-- ---------------------------------------------------------------------------
+-- CREATE TABLE IF NOT EXISTS above only creates a missing table: on a database
+-- that already has one, a constraint added later is never applied, so the
+-- upgrade is restated here and re-run on every deploy. Dropping and re-adding
+-- is safe because every status already stored satisfies the wider list, and
+-- 'expired' is what the payment-proof expiry sweep writes.
+ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_status_allowed;
+ALTER TABLE orders ADD CONSTRAINT orders_status_allowed CHECK (
+    status IN (
+        'pending_payment',
+        'pending_approval',
+        'approved',
+        'rejected',
+        'cancelled',
+        'expired',
+        'ready_for_topup',
+        'topup_processing',
+        'topup_completed',
+        'topup_failed',
+        'needs_review'
+    )
+);
+
+-- ---------------------------------------------------------------------------
 -- PAYMENTS
 -- ---------------------------------------------------------------------------
 -- One row per money movement the customer initiated: a wallet top-up (EZ

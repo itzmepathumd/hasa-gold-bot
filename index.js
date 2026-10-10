@@ -3088,6 +3088,35 @@ Status: ${statusBadge(order.status)}`
     );
   }
 
+  /*
+  | A screenshot on its own does not say which ledger the money came through,
+  | and an order saved with no method shows up in the admin queue as "Not set"
+  | - the reviewer has to ask the customer before they can verify anything.
+
+  | So the proof is only accepted once a method has been chosen through "I
+  | HAVE PAID". Skipping it was possible before, and the order still landed in
+  | the queue missing the one thing that makes it reviewable.
+  */
+  if (order.paymentMethod !== "wallet" && !order.paymentMethod) {
+    return ctx.reply(
+      `⚠️ *CHOOSE A PAYMENT METHOD FIRST*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `🧾 ${code(order.id)}\n\n` +
+        `Send which method you paid with before\n` +
+        `the screenshot, so it can be verified\n` +
+        `against the right account.\n\n` +
+        `Tap *I HAVE PAID* on the order screen,\n` +
+        `then send your screenshot here.`,
+      {
+        parse_mode: "Markdown",
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback("📸  I HAVE PAID", "payment_done")],
+          [Markup.button.callback("❌  CANCEL ORDER", "cancel_order")],
+        ]),
+      }
+    );
+  }
+
   const photos = ctx.message.photo;
 
   const largestPhoto =
@@ -3836,6 +3865,29 @@ async function notifyTopupResult(order, resultType) {
 const UNPAID_ORDER_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours
 const EXPIRY_INTERVAL_MS = 30 * 60 * 1000; // every 30 minutes
 
+/*
+| The label for an order's payment method.
+
+| It is resolved against the configured methods so the admin sees "EZ Cash",
+| the name they set, rather than "Ez_cash" - which is not just ugly but fatal:
+| the underscore in a raw code is Telegram markup, and an unescaped one makes
+| the whole message unparseable, which is what blanked the pending-orders
+| screen. The result is escaped here once so no caller has to remember.
+*/
+function paymentMethodLabel(order) {
+  const code = String(order?.paymentMethod || "").trim();
+
+  if (!code) {
+    return "_Not set_";
+  }
+
+  const configured = catalog
+    .getPayments({ includePaused: true })
+    .find((m) => m.id === code);
+
+  return esc(configured ? configured.title : code);
+}
+
 async function expireUnpaidOrders() {
   const cutoff = Date.now() - UNPAID_ORDER_TTL_MS;
 
@@ -4438,9 +4490,7 @@ function reviewQueueText() {
     `⚠️ ${reviewing.length} order(s) need a decision:\n\n`;
 
   for (const order of reviewing.slice(0, 10)) {
-    const paymentMethod = order.paymentMethod
-      ? order.paymentMethod.charAt(0).toUpperCase() + order.paymentMethod.slice(1)
-      : "Not set";
+    const paymentMethod = paymentMethodLabel(order);
     text +=
       `🧾 ${esc(order.id)}\n` +
       `🎮 ${esc(order.gameName)}\n` +
@@ -5932,9 +5982,7 @@ for approval.`,
     `━━━━━━━━━━━━━━━━━━\n\n`;
 
   for (const order of pending.slice(0, 10)) {
-    const paymentMethod = order.paymentMethod
-      ? order.paymentMethod.charAt(0).toUpperCase() + order.paymentMethod.slice(1)
-      : "Not set";
+    const paymentMethod = paymentMethodLabel(order);
     message +=
       `🧾 ${esc(order.id)}\n` +
       `📦 ${esc(order.productName)}\n` +
@@ -6171,9 +6219,7 @@ bot.action("admin_all_orders", async (ctx) => {
     `━━━━━━━━━━━━━━━━━━\n\n`;
 
   for (const order of latest) {
-    const paymentMethod = order.paymentMethod
-      ? order.paymentMethod.charAt(0).toUpperCase() + order.paymentMethod.slice(1)
-      : "Not set";
+    const paymentMethod = paymentMethodLabel(order);
     message +=
       `🧾 ${esc(order.id)}\n` +
       `📦 ${esc(order.productName)}\n` +

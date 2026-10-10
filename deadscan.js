@@ -12,7 +12,10 @@ const telegraf = require("telegraf");
 */
 
 telegraf.Telegraf.prototype.launch = function () {};
-process.env.BOT_TOKEN = process.env.BOT_TOKEN || "123:FAKE";
+// index.js will not load without both of these; the scan stubs every
+// Telegram call, so a token and an id stand in for the real ones.
+process.env.BOT_TOKEN = process.env.BOT_TOKEN || "123456:FAKE_TOKEN_FOR_TESTS";
+process.env.ADMIN_ID = process.env.ADMIN_ID || "1";
 
 const src = fs.readFileSync("./index.js", "utf8");
 const lines = src.split("\n");

@@ -248,7 +248,7 @@ function snapshot(context = {}, now = Date.now()) {
   // The order store is not probed on demand. It reports what it knows: the
   // backend it chose and whether the read mirror came up. An unloaded mirror
   // is a real failure, not an untested component.
-  const mirrorDown = store.mode === "firestore" && store.mirrorReady === false;
+  const mirrorDown = store.mode === "postgres" && store.mirrorReady === false;
 
   checks.push({
     key: "store",
@@ -372,7 +372,7 @@ function renderAdmin(snap, storeName = "HASA GOLD STORE") {
     text += `🆔 Project\n${escapeMarkdown(store.projectId)}\n`;
   }
 
-  if (store.mode === "firestore") {
+  if (store.mode === "postgres") {
     text += `🪞 Mirror\n${
       store.mirrorReady
         ? `loaded (${store.mirroredOrders} order(s))`
@@ -436,8 +436,8 @@ function renderAdmin(snap, storeName = "HASA GOLD STORE") {
 | statustest.js fails.
 */
 const NEVER_SHOW = [
-  "firestore",
-  "firebase",
+  "supabase",
+  "postgres",
   "json",
   "grpc",
   "rest",

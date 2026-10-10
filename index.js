@@ -11,6 +11,7 @@ const botStatus = require("./status");
 const webhookServer = require("./webhookServer");
 const { Shop2TopupAdapter } = require("./src/shop2topup");
 const wallet = require("./src/wallet");
+const payments = require("./src/database/payments");
 const nexaura = require("./src/database/nexaura");
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
@@ -270,7 +271,7 @@ function paymentInstructions() {
 | ORDER DATABASE
 |--------------------------------------------------------------------------
 | Orders are read and written only through the database layer, which uses
-| Firestore when it is configured and the JSON files otherwise. Nothing here
+| Supabase when SUPABASE_DB_URL is configured. Nothing here
 | touches a file directly any more.
 */
 
@@ -292,6 +293,55 @@ const {
   healthCheck: checkOrderStoreHealth,
   closeDb: closeOrderStore,
 } = require("./src/database/orders");
+
+/*
+|--------------------------------------------------------------------------
+| DATABASE REQUIRED
+|--------------------------------------------------------------------------
+| Orders, wallets and the catalogue all live in PostgreSQL. Without a
+| connection string the shop cannot remember an order, a balance or a
+| product, so it stops instead of trading on an empty store.
+|
+| The message names the exact variable and where to get its value, because
+| a bot that refuses to start with "database unavailable" is a support call,
+| while one that names SUPABASE_DB_URL is a two-minute fix.
+*/
+const ordersStore = require("./src/database/orders");
+
+async function requireDatabase() {
+  if (ordersStore.usingDatabase()) {
+    return true;
+  }
+
+  /*
+  | One real connection attempt, so the message names the cause rather than
+  | guessing between "not set" and "set but unreachable".
+  */
+  const health = await ordersStore.healthCheck().catch((error) => ({
+    ok: false,
+    error: error.message,
+  }));
+
+  const why = { ...ordersStore.describe(), error: health.error || null };
+
+  console.error(
+    "\n❌ " +
+      (why.mode === "unavailable"
+        ? `Supabase is configured but unreachable: ${why.error}`
+        : "SUPABASE_DB_URL is not set, so the bot has no database") +
+      "\n\n" +
+      "   1. Create a project at https://supabase.com/dashboard\n" +
+      "   2. Open Project settings > Database and copy the connection string\n" +
+      "   3. Run the schema:\n" +
+      "        npm run db:schema\n" +
+      "   4. Put the string in .env as SUPABASE_DB_URL=postgresql://...\n\n" +
+      "   Verify it with: npm run db:check\n\n" +
+      "   The bot stops now because orders, wallets and the catalogue cannot\n" +
+      "   be stored without it. Nothing was traded on an empty database.\n"
+  );
+
+  process.exit(1);
+}
 
 /*
 | Tell the admin the order store is unusable, once per distinct reason.
@@ -1304,6 +1354,65 @@ async function handleWalletFlow(ctx, text) {
     }
 
     if (verification.status === "credited") {
+      /*
+      | Record the deposit before crediting anything, and refuse if this
+      | number was already credited. The RN is the only thing a customer
+      | controls, so without this a second attempt at the same RN would
+      | credit the same deposit twice.
+      */
+      let deposit = null;
+
+      try {
+        deposit = await payments.findProviderDeposit("nexaura", rn);
+      } catch (error) {
+        console.error(
+          `[PAYMENTS] Could not look up deposit ${rn}: ${error.message}`
+        );
+      }
+
+      if (!deposit) {
+        try {
+          const recorded = await payments.recordProviderDeposit({
+            provider: "nexaura",
+            referenceNumber: rn,
+            telegramId: ctx.from.id,
+            depositId: verification.depositId,
+            status: "verified",
+            amountLkr: verification.amount,
+          });
+
+          deposit = {
+            ...recorded,
+            userId: String(ctx.from.id),
+            depositId: verification.depositId,
+            status: recorded.ok ? recorded.status : "pending",
+            amountLkr: verification.amount,
+            creditedLkr: null,
+            walletTransactionId: null,
+            attempts: 1,
+          };
+        } catch (error) {
+          console.error(
+            `[PAYMENTS] Could not record deposit ${rn}: ${error.message}`
+          );
+        }
+      }
+
+      if (deposit && deposit.status === "credited") {
+        return ctx.reply(
+          `✅ *ALREADY CREDITED*\n\n` +
+            `━━━━━━━━━━━━━━━━━━\n\n` +
+            `This RN was already credited to a wallet.\n\n` +
+            `🔢 RN: ${rn}\n` +
+            `🆔 Deposit: ${deposit.depositId || verification.depositId}\n\n` +
+            `If you believe this is wrong, contact support\nwith the RN above.`,
+          {
+            parse_mode: "Markdown",
+            ...wallet.walletMenu(),
+          }
+        );
+      }
+
       const result = await wallet.requestRecharge(
         ctx.from.id,
         verification.amount,
@@ -1335,6 +1444,21 @@ async function handleWalletFlow(ctx, text) {
             parse_mode: "Markdown",
             ...wallet.walletMenu(),
           }
+        );
+      }
+
+      // The credit is irreversible from here on, so the deposit is marked
+      // now: a retry finds this row and stops.
+      try {
+        await payments.markDepositCredited(
+          "nexaura",
+          rn,
+          approveResult.transactionId || 0,
+          verification.amount
+        );
+      } catch (error) {
+        console.error(
+          `[PAYMENTS] Could not mark deposit ${rn} as credited: ${error.message}`
         );
       }
 
@@ -2661,11 +2785,20 @@ bot.action("pay_with_wallet", async (ctx) => {
   }
 
   const applied = await mutateOrder(orderId, (current) => {
-    current.status = "pending_approval";
+    current.status = "approved";
+    current.approvedAt = new Date().toISOString();
     current.paymentMethod = "wallet";
     current.walletTransactionId = result.transactionId;
     current.paymentProof = `wallet://${result.transactionId}`;
     current.paymentSubmittedAt = new Date().toISOString();
+    current.topupStatus = "ready_for_topup";
+    current.topupAttempts = 0;
+    current.topupStartedAt = null;
+    current.topupCompletedAt = null;
+    current.topupError = null;
+    current.topupRetryArmed = false;
+    current.providerStatus = null;
+    current.providerRaw = null;
 
     return current;
   });
@@ -2682,14 +2815,20 @@ bot.action("pay_with_wallet", async (ctx) => {
 
   ensureSession(ctx).waitingForPayment = false;
 
+  // Auto-trigger top-up for wallet payments
+  const automated = topupProvider.canFulfill(applied);
+  if (automated) {
+    setImmediate(() => processAutoTopup(orderId));
+  }
+
   await ctx.editMessageText(
     `✅ *PAYMENT CONFIRMED*\n\n` +
       `━━━━━━━━━━━━━━━━━━\n\n` +
       `🧾 Order: ${code(order.id)}\n` +
       `💰 Paid: LKR ${wallet.formatLKR(order.price)}\n` +
       `💳 Method: Wallet\n\n` +
-      `⏳ Your order is now pending approval.\n` +
-      `You will be notified once it is processed.`,
+      `${automated ? `🚀 Your top-up is now being processed.\n\n` : `⏳ Your order is approved and will be processed shortly.\n\n`}` +
+      `You will be notified once it is completed.`,
     {
       parse_mode: "Markdown",
       ...Markup.inlineKeyboard([
@@ -3260,6 +3399,8 @@ async function resolveTopupOrder(orderId, attempt = 1) {
       current.providerStatus = result.providerStatus || null;
 
       if (result.raw) {
+        // The provider's raw answer is one JSONB column. The row mapper
+        // strips undefined fields, which the driver would reject.
         current.providerRaw = result.raw;
       }
 
@@ -6556,8 +6697,15 @@ let webhookHandle = null;
 let transport = "polling";
 
 async function startBot() {
-  // The order store decides itself, and loading it has to finish before
-  // recovery runs so recovery reads the same data the screens will.
+  // Without a database the shop cannot store an order or a wallet balance,
+  // and a bot that accepts orders it cannot remember is worse than one that
+  // refuses to start. The schema and the connection string are both one
+  // setup step; refusing here makes a missing one obvious on the first boot.
+  await requireDatabase();
+
+  // The order store reads its whole mirror at once, and loading it has to
+  // finish before recovery runs so recovery reads the same data the screens
+  // will.
   const store = await hydrateOrders();
 
   console.log(`[DB] Order store: ${store.mode} (${store.orders} order(s))`);
@@ -6567,6 +6715,17 @@ async function startBot() {
   } catch (error) {
     console.error(
       "[WALLETS] Hydration failed:",
+      error.message
+    );
+  }
+
+  // The catalogue is served from memory, so it has to be loaded before the
+  // provider is initialised and before a customer can pick a package.
+  try {
+    await catalog.hydrate();
+  } catch (error) {
+    console.error(
+      "[CATALOG] Hydration failed:",
       error.message
     );
   }
@@ -6722,6 +6881,10 @@ async function shutdown(signal) {
   stopTopupResolutions();
 
   await topupProvider.shutdown();
+
+  // A catalogue edit is queued, so the last one is waited for rather than
+  // left in flight when the process ends.
+  await catalog.flush().catch(() => {});
 
   await closeOrderStore();
 

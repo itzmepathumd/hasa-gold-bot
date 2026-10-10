@@ -6,6 +6,9 @@
 |
 | Uses the same idempotency pattern: order_id stored before charging,
 | reused on retry.
+|
+| Product IDs are fetched dynamically from Nexaura API /products endpoint
+| and mapped from catalog keys. This keeps Shop2Topup sub_category_id intact.
 */
 
 const { randomUUID } = require("crypto");
@@ -21,6 +24,7 @@ class NexauraTopupAdapter {
 
     this.isInitialized = false;
     this.testMode = !this.config.productionMode;
+    this.productMap = new Map();
   }
 
   async initialize() {
@@ -40,9 +44,42 @@ class NexauraTopupAdapter {
       throw new Error("NEXAURA_API_KEY is not configured");
     }
 
+    // Fetch and cache product mappings
+    await this.refreshProductMap();
+
     this.isInitialized = true;
     console.log("[NEXAURA TOPUP] Ready - Free Fire top-ups via Nexaura API");
     return true;
+  }
+
+  async refreshProductMap() {
+    try {
+      const result = await nexaura.fetchProducts();
+      if (result.ok && result.products) {
+        this.productMap.clear();
+
+        // Build mapping from catalog product_key -> Nexaura product_id
+        // Based on name/category matching
+        for (const p of result.products) {
+          const key = p.product_id;
+          this.productMap.set(key, {
+            product_id: p.product_id,
+            name: p.name,
+            price_lkr: p.price_lkr,
+            category: p.category,
+            diamonds: p.diamonds,
+          });
+        }
+
+        console.log(
+          `[NEXAURA TOPUP] Loaded ${this.productMap.size} products from API`
+        );
+      }
+    } catch (error) {
+      console.warn(
+        `[NEXAURA TOPUP] Could not refresh product map: ${error.message}`
+      );
+    }
   }
 
   newOrderId() {
@@ -55,16 +92,45 @@ class NexauraTopupAdapter {
   }
 
   nexauraProductId(order, product) {
-    // Map catalog product key to Nexaura product_id
+    // Get catalog product key
     const productKey = order?.productKey;
-    const mappings = {
+
+    // Try direct match first (exact product_id from API)
+    if (this.productMap.has(productKey)) {
+      return productKey;
+    }
+
+    // Fallback: try name-based matching from catalog
+    const catalogProduct = product || this.product(order);
+    if (catalogProduct) {
+      const name = String(catalogProduct.name || "").toLowerCase();
+      const category = String(catalogProduct.category || "").toLowerCase();
+
+      // Match by name/category
+      for (const [apiId, info] of this.productMap.entries()) {
+        const apiName = String(info.name || "").toLowerCase();
+        const apiCategory = String(info.category || "").toLowerCase();
+
+        if (
+          name.includes(apiName) ||
+          apiName.includes(name) ||
+          (category && category === apiCategory)
+        ) {
+          return apiId;
+        }
+      }
+    }
+
+    // Hardcoded fallbacks for known catalog keys
+    const fallbacks = {
       weekly: "weekly",
-      weekly_lite: "weekly_lite",
+      weekly_lite: "lite",
       monthly: "monthly",
-      booyah_pass: "booyah_pass",
-      elite_pass: "elite_pass",
+      booyah_pass: "evo30",
+      elite_pass: "level30",
     };
-    return mappings[productKey] || product?.nexaura_product_id || productKey;
+
+    return fallbacks[productKey] || productKey;
   }
 
   playerId(order) {
@@ -277,6 +343,7 @@ class NexauraTopupAdapter {
       testMode: this.testMode,
       ready: this.isReady(),
       provider: "NEXAURA (Free Fire)",
+      productsCached: this.productMap.size,
     };
   }
 

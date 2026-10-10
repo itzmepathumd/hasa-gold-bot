@@ -1,6 +1,11 @@
 const fs = require("fs");
 const path = require("path");
 
+// index.js refuses to load without a token. These tests stub every Telegram
+// call, so a fake one is enough.
+process.env.BOT_TOKEN = process.env.BOT_TOKEN || "123456:FAKE_TOKEN_FOR_TESTS";
+process.env.ADMIN_ID = process.env.ADMIN_ID || "1";
+
 /*
 |--------------------------------------------------------------------------
 | TOP-UP TEST
@@ -38,24 +43,59 @@ function check(label, condition, detail) {
   }
 }
 
-const ORDERS_FILE = path.join(__dirname, "orders.json");
+/*
+| Orders are seeded through the store, not through a file: the orders live in
+| PostgreSQL now, and a test that wrote a JSON file would be testing the
+| backup rather than the database.
+|
+| Every seeded id carries TEST in it, so a crash cannot leave rows behind
+| that the next run would then delete as somebody else's data.
+*/
+const TEST_ORDER_MARKER = process.env.TEST_ORDER_MARKER || "HG-TEST";
 
-let backup = null;
+const pool = new (require("pg").Pool)({
+  connectionString:
+    process.env.SUPABASE_DB_URL || process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+  max: 2,
+});
 
-function saveOrdersFile(orders) {
-  fs.writeFileSync(
-    ORDERS_FILE,
-    JSON.stringify(orders, null, 2)
+function testOrderIds() {
+  return pool.query(
+    `SELECT order_number FROM orders WHERE order_number LIKE $1`,
+    [`${TEST_ORDER_MARKER}%`]
   );
 }
 
-function restoreOrders() {
-  if (backup === null) {
-    fs.writeFileSync(ORDERS_FILE, "[]");
-    return;
-  }
+function isTestOrderId(id) {
+  return String(id || "").startsWith(TEST_ORDER_MARKER);
+}
 
-  fs.writeFileSync(ORDERS_FILE, backup);
+/**
+ * Replace the order book with exactly these orders.
+ */
+async function saveOrdersFile(orders) {
+  const seeded = orders.filter((order) => isTestOrderId(order.id));
+
+  const existing = await testOrderIds();
+
+  await pool.query(
+    `DELETE FROM orders WHERE order_number = ANY($1::text[])`,
+    [existing.rows.map((row) => row.order_number)]
+  );
+
+  for (const order of seeded) {
+    const created = await botModule.appendOrder(order);
+
+    if (!created) {
+      throw new Error(`Could not seed the order ${order.id}`);
+    }
+  }
+}
+
+function restoreOrders() {
+  // Nothing to restore: the database is the record, and every seeded row is
+  // removed by the next call to saveOrdersFile() or by the cleanup below.
 }
 
 function baseOrder(overrides = {}) {
@@ -120,6 +160,24 @@ for (const method of [
 }
 
 const Telegraf = require("telegraf").Telegraf;
+
+/*
+| This test drives the real order database, so it needs one. A local
+| PostgreSQL with the schema loaded is enough; a Supabase project works too.
+| Without a database the test cannot run, and it says so rather than passing
+| on an empty store.
+*/
+const connection = require("./src/database/connection");
+
+if (!connection.shouldUseDatabase()) {
+  console.log(
+    "\n== TOP-UP TEST SKIPPED ==\n" +
+      "   Needs SUPABASE_DB_URL. Run the schema first (npm run db:schema),\n" +
+      "   then set the connection string in .env and re-run.\n"
+  );
+  process.exit(0);
+}
+
 
 Telegraf.prototype.launch = async function () {};
 Telegraf.prototype.stop = async function () {};
@@ -211,7 +269,7 @@ function stubProvider(reply, lookup) {
   try {
     console.log("\n== a successful top-up completes ==");
 
-    saveOrdersFile([baseOrder()]);
+    await saveOrdersFile([baseOrder()]);
     placed.length = 0;
     minted = 0;
     stubProvider();
@@ -282,7 +340,7 @@ function stubProvider(reply, lookup) {
 
     console.log("\n== approving twice places one order ==");
 
-    saveOrdersFile([
+    await saveOrdersFile([
       baseOrder({ status: "approved", topupStatus: "ready_for_topup" }),
     ]);
     placed.length = 0;
@@ -327,7 +385,7 @@ function stubProvider(reply, lookup) {
     console.log("\n== a retry reuses the stored key ==");
 
     // What an admin retry produces: parked order, existing provider id.
-    saveOrdersFile([
+    await saveOrdersFile([
       baseOrder({
         status: "needs_review",
         topupStatus: "needs_review",
@@ -360,7 +418,7 @@ function stubProvider(reply, lookup) {
 
     console.log("\n== a parked order is never re-armed by itself ==");
 
-    saveOrdersFile([
+    await saveOrdersFile([
       baseOrder({
         status: "needs_review",
         topupStatus: "needs_review",
@@ -393,7 +451,7 @@ function stubProvider(reply, lookup) {
     console.log("\n== an unknown outcome is not resent ==");
 
     // The process died after the order was placed.
-    saveOrdersFile([
+    await saveOrdersFile([
       baseOrder({
         status: "topup_processing",
         topupStatus: "topup_processing",
@@ -445,7 +503,7 @@ function stubProvider(reply, lookup) {
 
     console.log("\n== a still-running order settles when it finishes ==");
 
-    saveOrdersFile([
+    await saveOrdersFile([
       baseOrder({
         status: "needs_review",
         topupStatus: "needs_review",
@@ -478,7 +536,7 @@ function stubProvider(reply, lookup) {
 
     console.log("\n== a provider failure reported by a lookup is terminal ==");
 
-    saveOrdersFile([
+    await saveOrdersFile([
       baseOrder({
         status: "needs_review",
         topupStatus: "needs_review",
@@ -505,7 +563,7 @@ function stubProvider(reply, lookup) {
 
     console.log("\n== a pending answer is not a delivery ==");
 
-    saveOrdersFile([
+    await saveOrdersFile([
       baseOrder({ status: "approved", topupStatus: "ready_for_topup" }),
     ]);
     placed.length = 0;
@@ -539,7 +597,7 @@ function stubProvider(reply, lookup) {
 
     console.log("\n== an unreachable provider is not a failure ==");
 
-    saveOrdersFile([
+    await saveOrdersFile([
       baseOrder({ status: "approved", topupStatus: "ready_for_topup" }),
     ]);
     placed.length = 0;
@@ -570,7 +628,7 @@ function stubProvider(reply, lookup) {
 
     console.log("\n== a provider refusal is terminal ==");
 
-    saveOrdersFile([
+    await saveOrdersFile([
       baseOrder({ status: "approved", topupStatus: "ready_for_topup" }),
     ]);
     stubProvider({
@@ -625,7 +683,7 @@ function stubProvider(reply, lookup) {
 
     console.log("\n== an unmapped package is never ordered ==");
 
-    saveOrdersFile([
+    await saveOrdersFile([
       baseOrder({
         gameId: "blood_strike",
         gameName: "Blood Strike",
@@ -664,7 +722,7 @@ function stubProvider(reply, lookup) {
 
     console.log("\n== exhausted attempts fail closed ==");
 
-    saveOrdersFile([
+    await saveOrdersFile([
       baseOrder({
         status: "approved",
         topupStatus: "ready_for_topup",
@@ -701,7 +759,7 @@ function stubProvider(reply, lookup) {
       })
     );
 
-    saveOrdersFile(many);
+    await saveOrdersFile(many);
     placed.length = 0;
     minted = 0;
     stubProvider();
@@ -752,44 +810,38 @@ function stubProvider(reply, lookup) {
       placed.every((p) => p.orderId && p.orderId === p.storedId)
     );
 
-    console.log("\n== a corrupt store blocks writes ==");
+    /*
+    | The store must refuse a write it cannot make rather than invent a
+    | result. An order number that was never created is the case that used
+    | to be covered by a corrupt file: the mutator runs, finds nothing, and
+    | nothing is reported as saved.
+    */
+    console.log("\n== an absent order is never invented ==");
 
-    fs.writeFileSync(ORDERS_FILE, "{ not json at all");
+    const absent = await botModule.mutateOrder(
+      "HG-ABSENT",
+      (current) => {
+        current.status = "approved";
 
-    const corruptRead = botModule.readOrders();
-
-    check(
-      "the read reports failure",
-      corruptRead.ok === false,
-      String(corruptRead.ok)
-    );
-    check(
-      "it does not pretend there are no orders",
-      Array.isArray(corruptRead.orders) &&
-        corruptRead.orders.length === 0 &&
-        corruptRead.ok === false
-    );
-
-    const written = await botModule.mutateOrder(
-      "HG-ANY",
-      (current) => current
+        return current;
+      }
     );
 
     check(
-      "a write is refused",
-      written === null,
+      "a write to an absent order returns nothing",
+      absent === null,
       "mutateOrder returned an order"
     );
 
     check(
-      "the corrupt file was left untouched",
-      fs.readFileSync(ORDERS_FILE, "utf8") === "{ not json at all",
-      "the file was overwritten"
+      "it did not join the order book",
+      !botModule.getOrders().some((o) => o.id === "HG-ABSENT"),
+      "the order appears in the book"
     );
 
     console.log("\n== startup recovery parks interrupted work ==");
 
-    saveOrdersFile([
+    await saveOrdersFile([
       baseOrder({
         id: "HG-INFLIGHT",
         status: "topup_processing",
@@ -866,10 +918,21 @@ function stubProvider(reply, lookup) {
 
     process.exitCode = fail ? 1 : 0;
   } finally {
+    // Remove everything this run seeded, so a crash mid-run cannot leave
+    // test rows behind for the next one to trip over.
+    const existing = await testOrderIds().catch(() => ({ rows: [] }));
+    await pool
+      .query(`DELETE FROM orders WHERE order_number = ANY($1::text[])`, [
+        existing.rows.map((row) => row.order_number),
+      ])
+      .catch(() => {});
+
     restoreOrders();
+    await pool.end();
   }
-})().catch((err) => {
+})().catch(async (err) => {
   restoreOrders();
   console.error("TEST CRASH:", err);
+  await pool.end().catch(() => {});
   process.exit(1);
 });

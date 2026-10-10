@@ -37,7 +37,7 @@ function freshSnapshot(overrides = {}) {
   return status.snapshot(
     {
       store: {
-        mode: "firestore",
+        mode: "postgres",
         transport: "rest",
         projectId: "hasagoldstoretgbot",
         mirrorReady: true,
@@ -147,7 +147,7 @@ console.log("\n== overall verdict ==");
 
 check("an unloaded mirror is a failure, not an untested component", () => {
   const snap = status.snapshot(
-    { store: { mode: "firestore", mirrorReady: false }, shuttingDown: false },
+    { store: { mode: "postgres", mirrorReady: false }, shuttingDown: false },
     NOW
   );
   assert.strictEqual(status.overall(snap), "down");
@@ -178,7 +178,7 @@ console.log("\n== admin panel ==");
 const adminText = status.renderAdmin(freshSnapshot(), "HASA GOLD STORE");
 
 check("the admin panel shows the backend, transport and project", () => {
-  assert.ok(adminText.includes("firestore"), "backend missing");
+  assert.ok(adminText.includes("postgres"), "backend missing");
   assert.ok(adminText.includes("rest"), "transport missing");
   assert.ok(adminText.includes("hasagoldstoretgbot"), "project missing");
 });
@@ -228,7 +228,7 @@ check("the admin panel marks itself as the internal view", () => {
 });
 
 check("a broken component turns the admin headline red", () => {
-  const snap = status.snapshot({ store: { mode: "firestore", mirrorReady: false } }, NOW);
+  const snap = status.snapshot({ store: { mode: "postgres", mirrorReady: false } }, NOW);
   assert.ok(/ATTENTION NEEDED/.test(status.renderAdmin(snap, "TEST")));
 });
 
@@ -278,7 +278,7 @@ check("the customer panel shows the shop's clock, not UTC", () => {
 });
 
 check("the customer panel never names the database vendor", () => {
-  assert.ok(!/firestore|firebase/i.test(customerText), "vendor named");
+  assert.ok(!/firestore|firebase|supabase/i.test(customerText), "vendor named");
 });
 
 check("the customer panel never names the project or region", () => {
@@ -303,7 +303,7 @@ check("the customer panel never shows the order count or an uptime figure", () =
   const snap = status.snapshot(
     {
       store: {
-        mode: "firestore",
+        mode: "postgres",
         transport: "rest",
         projectId: "hasagoldstoretgbot",
         mirrorReady: true,
@@ -331,7 +331,7 @@ check("a hostile store value cannot reach a customer", () => {
   const snap = status.snapshot(
     {
       store: {
-        mode: "firestore on Google Cloud",
+        mode: "postgres",
         transport: "grpc",
         projectId: "leaky-project",
         mirrorReady: true,
@@ -356,7 +356,7 @@ check("a shutdown message never reaches a customer verbatim", () => {
 
 check("the degraded customer panel still routes to support", () => {
   const snap = status.snapshot(
-    { store: { mode: "firestore", mirrorReady: false }, shuttingDown: false },
+    { store: { mode: "postgres", mirrorReady: false }, shuttingDown: false },
     NOW
   );
   const text = status.renderCustomer(snap, "HASA GOLD STORE");

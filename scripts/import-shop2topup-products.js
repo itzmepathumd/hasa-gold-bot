@@ -217,9 +217,17 @@ async function main() {
     `\n${added} package(s) to add, ${skipped} already present.` +
       (args.apply ? "" : " Nothing was written: add --apply.")
   );
+
+  /*
+  | Every catalogue write is queued rather than awaited, so the script has to
+  | wait for the last one before it exits. Without this the process would end
+  | with the catalogue change still in flight and lose it.
+  */
+  await catalog.flush();
 }
 
-main().catch((error) => {
+main().catch(async (error) => {
   console.error("\nIMPORT FAILED:", error.message);
+  await catalog.flush().catch(() => {});
   process.exit(1);
 });

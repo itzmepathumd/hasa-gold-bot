@@ -270,10 +270,41 @@ async function getTopupStatus(orderId) {
   }
 }
 
+async function fetchProducts() {
+  const client = await getClient();
+
+  if (!client) {
+    return { ok: false, error: "Nexaura API key not configured" };
+  }
+
+  try {
+    const response = await client.get("/products");
+    const data = response.data;
+
+    if (data.success && data.products) {
+      return {
+        ok: true,
+        products: data.products,
+      };
+    }
+
+    return {
+      ok: false,
+      error: data.error?.message || "Failed to fetch products",
+    };
+  } catch (error) {
+    const message =
+      error.response?.data?.error?.message || error.message || "Network error";
+
+    return { ok: false, error: message };
+  }
+}
+
 module.exports = {
   verifyEzCashDeposit,
   getDepositStatus,
   getBalance,
   placeTopup,
   getTopupStatus,
+  fetchProducts,
 };

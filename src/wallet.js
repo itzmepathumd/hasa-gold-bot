@@ -17,7 +17,6 @@
 */
 
 const store = require("./database/wallets");
-const { getDb } = require("./database/firestore");
 const nexaura = require("./database/nexaura");
 
 const MIN_RECHARGE = 100;
@@ -150,16 +149,34 @@ async function payWithWallet(userId, amount, refId, refType, note) {
     return { ok: false, error: "Invalid amount." };
   }
 
-  const balance = getBalance(userId);
+  /*
+  | The balance is not checked here before the debit. The database decides,
+  | and it decides under a row lock on the customer: reading the balance and
+  | then writing it back would let two requests spend the same money if they
+  | arrived together. The check that answers the customer is the database
+  | returning insufficient_balance.
+  */
+  const result =
+    refType === "order_payment"
+      ? await store.payForOrder(userId, refId, amountNum, note)
+      : await store.debitWallet(userId, amountNum, refId, refType, note);
 
-  if (balance < amountNum) {
-    return {
-      ok: false,
-      error: `Insufficient balance. You have LKR ${formatLKR(balance)}. Please recharge your wallet.`,
-    };
+  if (!result.ok) {
+    if (result.detail === "insufficient_balance") {
+      return {
+        ok: false,
+        error: `Insufficient balance. You have LKR ${formatLKR(getBalance(userId))}. Please recharge your wallet.`,
+      };
+    }
+
+    return { ok: false, error: result.error };
   }
 
-  return store.debitWallet(userId, amountNum, refId, refType, note);
+  return {
+    ok: true,
+    balance: result.balance,
+    transactionId: result.transactionId,
+  };
 }
 
 /*

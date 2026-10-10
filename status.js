@@ -409,8 +409,16 @@ function renderAdmin(snap, storeName = "HASA GOLD STORE") {
     text += `🔌 Mode\n${escapeMarkdown(provider.mode || "unknown")}\n`;
     text += `🤝 Ready\n${provider.available ? "yes" : "no"}\n`;
 
+    if (provider.providers && Array.isArray(provider.providers)) {
+      for (const p of provider.providers) {
+        text += `\n${p.name} (${p.games})\n`;
+        text += `   Status: ${p.ready ? "🟢 ready" : "🔴 not ready"}\n`;
+        text += `   ${escapeMarkdown(p.detail)}\n`;
+      }
+    }
+
     if (provider.detail) {
-      text += `ℹ️ ${escapeMarkdown(provider.detail)}\n`;
+      text += `\nℹ️ ${escapeMarkdown(provider.detail)}\n`;
     }
   }
 

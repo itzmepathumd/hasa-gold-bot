@@ -5059,10 +5059,19 @@ function adminMenu() {
 | spend API quota to answer a question the last real result already answers.
 */
 
+
 function statusContext() {
   const store = describeOrderStore();
   const games = catalog.getGames();
   const providerState = topupProvider.getStatus();
+
+  // Combine both providers into one view so the admin sees which handles which game
+  const shop2topup = providerState.shop2topup || {};
+  const nexaura = providerState.nexaura || {};
+
+  const anyReady = shop2topup.ready || nexaura.ready;
+  const anyConfigured = shop2topup.configured || nexaura.productsCached > 0;
+  const testMode = shop2topup.testMode || nexaura.testMode;
 
   return {
     store: {
@@ -5084,22 +5093,41 @@ function statusContext() {
       payments: catalog.getPayments().length,
     },
     provider: {
-      // The mode matters more than the partner: the admin needs to see that
-      // top-ups are simulated, and why.
-      mode: providerState.testMode ? "test" : "production",
-      available: providerState.ready,
-      detail: providerState.testMode
-        ? "No real top-ups are sent"
-        : providerState.ready
-          ? `via ${providerState.provider} order API`
-          : providerState.configured
-            ? "The provider is not ready, so approvals go to manual review"
-            : "No API key configured, so approvals go to manual review",
+      mode: testMode ? "test" : "production",
+      available: anyReady,
+      providers: [
+        {
+          name: "SHOP2TOPUP",
+          games: "Blood Strike",
+          ready: shop2topup.ready,
+          configured: shop2topup.configured,
+          detail: shop2topup.ready
+            ? "order API ready"
+            : shop2topup.configured
+              ? "not ready — manual review"
+              : "API key not configured",
+        },
+        {
+          name: "NEXAURA",
+          games: "Free Fire",
+          ready: nexaura.ready,
+          configured: nexaura.productsCached > 0,
+          detail: nexaura.ready
+            ? "Free Fire products cached"
+            : nexaura.productsCached > 0
+              ? "products cached, not ready"
+              : "product map not loaded",
+        },
+      ],
+      detail: anyReady
+        ? "real top-ups active"
+        : anyConfigured
+          ? "providers configured but not ready — approvals go to manual review"
+          : "no API keys configured — approvals go to manual review",
     },
     shuttingDown: isShuttingDown,
   };
 }
-
 function adminStatusMenu() {
   return Markup.inlineKeyboard([
     [Markup.button.callback("🔄  REFRESH", "admin_status_refresh")],

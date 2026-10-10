@@ -2851,7 +2851,7 @@ Status: ${statusBadge(order.status)}`
     .map((method) => [
       Markup.button.callback(
         `${method.emoji}  ${method.title}`,
-        `order_pay_${method.method_code}`
+        `order_pay_${method.id}`
       ),
     ]);
 
@@ -2888,7 +2888,7 @@ bot.action(/^order_pay_(.+)$/, async (ctx) => {
   const methodCode = ctx.match[1];
   const method = catalog
     .getPayments({ includePaused: true })
-    .find((m) => m.method_code === methodCode);
+    .find((m) => m.id === methodCode);
 
   if (!method) {
     return ctx.reply("❌ That payment method is not available.");
@@ -3821,6 +3821,79 @@ async function notifyTopupResult(order, resultType) {
 | Orders that were mid-flight when the process stopped are parked for a
 | human, never resent.
 */
+/*
+|--------------------------------------------------------------------------
+| EXPIRING UNPAID ORDERS
+|--------------------------------------------------------------------------| An order waiting for a screenshot that never arrives stays in
+| pending_payment forever, holding a place in the admin queue and in the
+| customer session long after they have moved on. Nothing was paid and
+| nothing was promised, so it can only be closed.
+
+| The window is deliberately generous: a customer who genuinely paid has
+| hours, and a payment that really did arrive can still be approved from the
+| screenshot afterwards. This only recycles orders that produced nothing.
+*/
+const UNPAID_ORDER_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours
+const EXPIRY_INTERVAL_MS = 30 * 60 * 1000; // every 30 minutes
+
+async function expireUnpaidOrders() {
+  const cutoff = Date.now() - UNPAID_ORDER_TTL_MS;
+
+  const stuck = getOrders().filter((order) => {
+    if (order.status !== "pending_payment") {
+      return false;
+    }
+
+    // A wallet payment never waits for a screenshot; only these can stall.
+    if (order.paymentMethod === "wallet") {
+      return false;
+    }
+
+    const created = Date.parse(order.createdAt);
+
+    return Number.isFinite(created) && created < cutoff;
+  });
+
+  for (const order of stuck) {
+    const applied = await mutateOrder(order.id, (current) => {
+      if (current.status !== "pending_payment") {
+        return false;
+      }
+
+      current.status = "cancelled";
+      current.cancelledAt = new Date().toISOString();
+      current.cancelReason = "expired_no_payment_proof";
+
+      return true;
+    });
+
+    if (!applied) {
+      continue;
+    }
+
+    console.log(`[EXPIRY] Order ${order.id}: no payment proof arrived, cancelled`);
+
+    try {
+      await bot.telegram.sendMessage(
+        Number(order.userId),
+        `⌛ *ORDER EXPIRED*\n\n` +
+          `━━━━━━━━━━━━━━━━━━\n\n` +
+          `🧾 ${code(order.id)}\n\n` +
+          `No payment screenshot arrived, so this\n` +
+          `order has been cancelled.\n\n` +
+          `Nothing was charged. If you did pay,\n` +
+          `contact support with your RN and we\n` +
+          `will sort it out.`,
+        { parse_mode: "Markdown" }
+      );
+    } catch (error) {
+      console.error(`[EXPIRY] Notice failed for ${order.id}: ${error.message}`);
+    }
+  }
+
+  return stuck.length;
+}
+
 async function runStartupRecovery() {
   console.log("[STARTUP] Checking for unfinished top-ups...");
 
@@ -6189,14 +6262,20 @@ bot.action("admin_nexaura_balance", async (ctx) => {
     );
   }
 
-  const result = await nexaura.getBalance();
+  /*
+  | getBalance answers with the amount, or null when it could not read one.
+  | It is not a result object: treating it as one made every check report
+  | "Unknown error" while the balance was plainly there.
+  */
+  const balance = await nexaura.getBalance();
 
-  if (!result.ok) {
+  if (balance === null) {
     return ctx.reply(
       `🔋 *NEXAURA BALANCE*\n\n` +
         `━━━━━━━━━━━━━━━━━━\n\n` +
         `⚠️ Could not read the balance.\n\n` +
-        `${esc(result.error || "Unknown error")}`,
+        `The Nexaura API did not return a\n` +
+        `usable figure. Try again shortly.`,
       {
         parse_mode: "Markdown",
         ...Markup.inlineKeyboard([
@@ -6215,7 +6294,7 @@ bot.action("admin_nexaura_balance", async (ctx) => {
   return ctx.reply(
     `🔋 *NEXAURA BALANCE*\n\n` +
       `━━━━━━━━━━━━━━━━━━\n\n` +
-      `💰 *BALANCE*\nLKR ${wallet.formatLKR(result.balance)}\n\n` +
+      `💰 *BALANCE*\nLKR ${wallet.formatLKR(balance)}\n\n` +
       `📦 *PRODUCTS AVAILABLE*\n${readyProducts}\n\n` +
       `━━━━━━━━━━━━━━━━━━\n\n` +
       `This is the reseller wallet that Free\n` +
@@ -7231,6 +7310,14 @@ async function startBot() {
     // and Telegram would then deliver nothing at all.
     transport = "webhook";
   } else {
+    // Sweep for unpaid orders on a timer, not only at boot: a bot that never
+    // restarts still has to recycle the ones that go quiet.
+    setInterval(() => {
+      expireUnpaidOrders().catch((error) => {
+        console.error(`[EXPIRY] Sweep failed: ${error.message}`);
+      });
+    }, EXPIRY_INTERVAL_MS);
+
     await bot.launch();
 
     transport = "polling";
@@ -7540,6 +7627,7 @@ const TEXT_SHORTCUTS = {
   stop: "cancel",
   about: "about",
   games: "games",
+  status: "status",
 };
 
 // The admin commands are only useful to the admin, so they are only
@@ -7571,11 +7659,21 @@ bot.on("text", async (ctx) => {
   // "/help@SomeBot" arrives with the bot username attached in groups.
   const isCommand = raw.startsWith("/");
 
+  /*
+  | The persistent keyboard sends its label, emoji included: "📡  Status"
+  | arrives as exactly that. The shortcut map is keyed on words, so the label
+  | is stripped back to one first. Without this, tapping any of these buttons
+  | found no target and fell through to whatever the catch-all said next.
+  */
   const word = (
     isCommand ? raw.slice(1).split("@")[0].split(" ")[0] : raw
-  ).toLowerCase();
+  )
+    .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}\u{2B00}-\u{2BFF}]/gu, "")
+    .replace(/[^a-z\s]/gi, "")
+    .replace(/\s+/g, "")
+    .toLowerCase();
 
-  const target = TEXT_SHORTCUTS[word];
+  const target = TEXT_SHORTCUTS[word] || null;
 
   // A pending order still has to be paid, so nudge instead of drawing a menu.
   // An explicit "cancel" is honoured, otherwise the customer is stuck being

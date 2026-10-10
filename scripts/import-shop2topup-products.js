@@ -10,31 +10,29 @@ const catalog = require("../catalog");
 | Copies a game's real product list out of the SHOP2TOPUP catalog and into
 | this shop's catalog, so every product has a sub_category_id and can be
 | ordered automatically.
-
+|
 | Where the game name comes from matters. The products endpoint
 | (/catalog/subcategories) has no game field at all, and product names are
 | not unique across games: "100 Diamonds" is a Free Fire product and a Mobile
 | Legends product and a PUBG product. Matching on names would mix them up and
 | charge a customer for the wrong game.
-
+|
 | So the game is read from /catalog/categories, where each category carries a
 | big_category_name, and only the categories under that game are imported.
-
+|
 |   node scripts/import-shop2topup-products.js
 |   node scripts/import-shop2topup-products.js --game="Free Fire" --game=free_fire
 |   node scripts/import-shop2topup-products.js --apply --price=0
-
+|
 | Flags:
 |   --apply         write the packages. Without it this only prints a plan.
 |   --game=NAME     a big_category_name from the provider, or a local game id.
 |                   Repeatable. Defaults to every game already in this shop.
 |   --category=ID   only this provider category id. Repeatable.
-|   --country=CODE  only categories serving this ISO country code. Repeatable.
-|   --region=NAME   only categories in this region name. Repeatable.
 |   --price=N       LKR price to give each package. Default 0.
 |   --live          add packages unpaused. Default is paused, so a package
 |                   with no price set cannot be ordered by mistake.
-
+|
 | Nothing here places an order. It only reads the provider's catalog.
 */
 
@@ -47,7 +45,7 @@ const API_BASE = "/api/endpoints/v1/catalog";
 */
 
 function parseArgs(argv) {
-  const args = { games: [], categories: [], countries: [], regions: [], price: 0, live: false, apply: false };
+  const args = { games: [], categories: [], price: 0, live: false, apply: false };
 
   for (const raw of argv) {
     const [flag, ...rest] = raw.split("=");
@@ -57,8 +55,6 @@ function parseArgs(argv) {
     else if (flag === "--live") args.live = true;
     else if (flag === "--game") args.games.push(value);
     else if (flag === "--category") args.categories.push(Number(value));
-    else if (flag === "--country") args.countries.push(value.trim().toUpperCase());
-    else if (flag === "--region") args.regions.push(value.trim().toUpperCase());
     else if (flag === "--price") args.price = Number(value);
   }
 
@@ -135,18 +131,6 @@ async function main() {
   let added = 0;
   let skipped = 0;
 
-  const categoryFilters = args.categories.length
-    ? new Set(args.categories)
-    : null;
-
-  const countryFilters = args.countries.length
-    ? new Set(args.countries)
-    : null;
-
-  const regionFilters = args.regions.length
-    ? new Set(args.regions)
-    : null;
-
   for (const local of localGames) {
     if (
       onlyTheseGames &&
@@ -163,26 +147,9 @@ async function main() {
       continue;
     }
 
-    const filtered = match.filter((c) => {
-      if (categoryFilters && !categoryFilters.has(Number(c.id))) return false;
-      if (countryFilters) {
-        const codes = new Set(
-          (c.country_ids || [])
-            .map((co) => String(co.code || "").trim().toUpperCase())
-            .filter(Boolean)
-        );
-        if (![...countryFilters].some((f) => codes.has(f))) return false;
-      }
-      if (regionFilters) {
-        const names = new Set(
-          (c.region_ids || [])
-            .map((r) => String(r.name || "").trim().toUpperCase())
-            .filter(Boolean)
-        );
-        if (![...regionFilters].some((f) => names.has(f))) return false;
-      }
-      return true;
-    });
+    const filtered = args.categories.length
+      ? match.filter((c) => args.categories.includes(c.id))
+      : match;
 
     console.log(
       `\n${local.name} (${local.id}) -> ${match.length} provider categor${
@@ -250,9 +217,17 @@ async function main() {
     `\n${added} package(s) to add, ${skipped} already present.` +
       (args.apply ? "" : " Nothing was written: add --apply.")
   );
+
+  /*
+  | Every catalogue write is queued rather than awaited, so the script has to
+  | wait for the last one before it exits. Without this the process would end
+  | with the catalogue change still in flight and lose it.
+  */
+  await catalog.flush();
 }
 
-main().catch((error) => {
+main().catch(async (error) => {
   console.error("\nIMPORT FAILED:", error.message);
+  await catalog.flush().catch(() => {});
   process.exit(1);
 });

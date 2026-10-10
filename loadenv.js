@@ -7,7 +7,7 @@
 |   .env        tracked, shared settings, no secrets
 |   .env.local  ignored, per-machine settings and any secret
 |
-| The second file wins, so a Firebase key or a local override never has to
+| The second file wins, so a database URL or any other secret never has to
 | be committed. Loading it here means every module that reads
 | process.env gets the same values, whichever file supplied them.
 */

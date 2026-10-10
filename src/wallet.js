@@ -17,14 +17,14 @@
 */
 
 const store = require("./database/wallets");
-const { getDb } = require("./database/firestore");
+const nexaura = require("./database/nexaura");
 
 const MIN_RECHARGE = 100;
 const MAX_SINGLE_RECHARGE = 50000;
 const MAX_DAILY_RECHARGE = 100000;
 
 const Markup = {
-  inlineKeyboard: (buttons) => ({ inline_keyboard: buttons }),
+  inlineKeyboard: (buttons) => ({ reply_markup: { inline_keyboard: buttons } }),
   button: {
     callback: (text, data) => ({ text, callback_data: data }),
   },
@@ -32,6 +32,7 @@ const Markup = {
 
 const METHODS = {
   ez_cash: { label: "EZ Cash", emoji: "💳" },
+  ez_cash_auto: { label: "EZ Cash Auto Verify", emoji: "⚡" },
   bank_transfer: { label: "Bank Transfer", emoji: "🏦" },
 };
 
@@ -98,10 +99,18 @@ async function requestRecharge(userId, amount, method, paymentProof) {
     return amountValidation;
   }
 
-  const proofValidation = validatePaymentProof(paymentProof);
+  const isAutoVerify = method === "ez_cash_auto";
 
-  if (!proofValidation.ok) {
-    return proofValidation;
+  let validatedProof = paymentProof;
+
+  if (!isAutoVerify) {
+    const proofValidation = validatePaymentProof(paymentProof);
+
+    if (!proofValidation.ok) {
+      return proofValidation;
+    }
+
+    validatedProof = proofValidation.proof;
   }
 
   const methodKey = String(method || "").toLowerCase().replace(/\s+/g, "_");
@@ -114,7 +123,7 @@ async function requestRecharge(userId, amount, method, paymentProof) {
     userId,
     amount: amountValidation.amount,
     method: methodKey,
-    paymentProof: proofValidation.proof,
+    paymentProof: validatedProof,
     status: "pending",
   };
 
@@ -140,16 +149,34 @@ async function payWithWallet(userId, amount, refId, refType, note) {
     return { ok: false, error: "Invalid amount." };
   }
 
-  const balance = getBalance(userId);
+  /*
+  | The balance is not checked here before the debit. The database decides,
+  | and it decides under a row lock on the customer: reading the balance and
+  | then writing it back would let two requests spend the same money if they
+  | arrived together. The check that answers the customer is the database
+  | returning insufficient_balance.
+  */
+  const result =
+    refType === "order_payment"
+      ? await store.payForOrder(userId, refId, amountNum, note)
+      : await store.debitWallet(userId, amountNum, refId, refType, note);
 
-  if (balance < amountNum) {
-    return {
-      ok: false,
-      error: `Insufficient balance. You have LKR ${formatLKR(balance)}. Please recharge your wallet.`,
-    };
+  if (!result.ok) {
+    if (result.detail === "insufficient_balance") {
+      return {
+        ok: false,
+        error: `Insufficient balance. You have LKR ${formatLKR(getBalance(userId))}. Please recharge your wallet.`,
+      };
+    }
+
+    return { ok: false, error: result.error };
   }
 
-  return store.debitWallet(userId, amountNum, refId, refType, note);
+  return {
+    ok: true,
+    balance: result.balance,
+    transactionId: result.transactionId,
+  };
 }
 
 /*
@@ -196,6 +223,7 @@ function walletScreenText(userId) {
 
 function walletMenu() {
   return Markup.inlineKeyboard([
+    [Markup.button.callback("⚡  EZ CASH AUTO VERIFY", "recharge_ez_cash_auto")],
     [Markup.button.callback("➕  RECHARGE", "recharge")],
     [Markup.button.callback("📜  HISTORY", "wallet_history")],
   ]);
@@ -223,12 +251,13 @@ function rechargeConfirmText(amount) {
     `💵 *CONFIRM RECHARGE*\n\n` +
     `━━━━━━━━━━━━━━━━━━\n\n` +
     `Amount: *LKR ${formatLKR(amount)}*\n\n` +
-    `Choose a payment method below,\nthen send your payment proof.`
+    `Choose a payment method below.`
   );
 }
 
 function rechargeConfirmMenu() {
   return Markup.inlineKeyboard([
+    [Markup.button.callback("⚡  EZ CASH AUTO VERIFY", "recharge_ez_cash_auto")],
     [Markup.button.callback("💳  EZ CASH", "recharge_ez_cash")],
     [Markup.button.callback("🏦  BANK TRANSFER", "recharge_bank_transfer")],
     [Markup.button.callback("❌  CANCEL", "recharge_cancel")],
@@ -246,6 +275,42 @@ function rechargeProofText(method, amount) {
     `after an admin verifies your payment.\n\n` +
     `Send a screenshot of your payment now.`
   );
+}
+
+function rechargeAutoVerifyText(amount) {
+  return (
+    `⚡ eZ CASH AUTO VERIFICATION\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `💳 PAYMENT DETAILS\n\n` +
+    `📱 eZ Cash Number\n` +
+    `"074 163 5465"\n\n` +
+    `💰 SERVICE FEE: Rs. 20 EXTRA\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `📌 HOW TO PAY\n\n` +
+    `1️⃣ Send your payment to the eZ Cash number above.\n\n` +
+    `2️⃣ Add Rs. 20 service fee to your top-up amount.\n\n` +
+    `3️⃣ Find the 14-digit RN Number in your eZ Cash payment SMS.\n\n` +
+    `4️⃣ Send your RN Number here to verify your payment automatically.\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `⚠️ සැ.යු  👇\n\n` +
+    `🔹 ඔබ ගෙවිය යුතු Top-up මුදලට අමතරව රු. 20ක සේවා ගාස්තුවක් එකතු කර ගෙවන්න.\n\n` +
+    `🔹 අමතර රු. 20 නොගෙවන්නේ නම්, එම ගාස්තුව ඔබ එවූ මුදලින් අඩු කරනු ලැබේ. එවිට Top-up සඳහා ලැබෙන මුදල අඩු වේ.\n\n` +
+    `📱 RN Number එක අනිවාර්යයි!\n\n` +
+    `ඔබගේ ගෙවීම තහවුරු කිරීමට eZ Cash SMS එකේ සඳහන් අංක 14ක RN Number එක අනිවාර්යයෙන් අවශ්‍ය වේ.\n\n` +
+    `❌ RN Number එක නොමැතිව ඔබගේ ගෙවීම තහවුරු කළ නොහැක.\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `⚡ AUTO VERIFICATION\n\n` +
+    `✅ Automatic payment verification\n` +
+    `💎 Automatic balance credit\n` +
+    `🔒 RN Number required as payment proof\n\n` +
+    `🚀 Fast • Easy • Automatic`
+  );
+}
+
+function rechargeAutoVerifyMenu() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback("❌  CANCEL", "recharge_cancel")],
+  ]);
 }
 
 function rechargeSubmittedText(request) {
@@ -414,6 +479,22 @@ async function hydrate() {
   return store.hydrate();
 }
 
+async function getPendingRecharges(limit = 50) {
+  return store.getPendingRecharges(limit);
+}
+
+async function getRecharge(requestId) {
+  return store.getRecharge(requestId);
+}
+
+async function approveRecharge(requestId, adminId) {
+  return store.approveRecharge(requestId, adminId);
+}
+
+async function rejectRecharge(requestId, adminId, reason = null) {
+  return store.rejectRecharge(requestId, adminId, reason);
+}
+
 module.exports = {
   METHODS,
   MIN_RECHARGE,
@@ -439,6 +520,12 @@ module.exports = {
   rechargeReviewMenu,
   walletHistoryText,
   hydrate,
+  getPendingRecharges,
+  getRecharge,
+  approveRecharge,
+  rejectRecharge,
+  rechargeAutoVerifyText,
+  rechargeAutoVerifyMenu,
   Markup,
   code,
 };

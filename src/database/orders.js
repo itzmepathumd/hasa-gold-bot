@@ -4,42 +4,35 @@
 |--------------------------------------------------------------------------
 | The single place the rest of the bot reads or writes orders.
 |
-| Two backends sit behind one interface:
+| Storage is PostgreSQL on Supabase. There is no second backend: a shop that
+| cannot store an order must not take one. When the database is unreachable
+| the store reports ok:false and the admin is told once per reason, instead
+| of the shop silently trading on a copy.
 |
-|   Firestore  - the production store. Every write is a transaction, so an
-|                order cannot be approved twice or claimed for top-up twice.
+| Reads come from an in-memory mirror rather than a query per screen. Several
+| admin screens and the analytics read the order book synchronously; making
+| them await would mean rewriting every list screen. The mirror is filled
+| once at startup from PostgreSQL and updated by every write, so the
+| collection is never re-downloaded to render a screen. PostgreSQL remains
+| the source of truth: the mirror is rebuilt from it on every boot, and
+| nothing is ever written only to memory.
 |
-|   JSON files - used only when Firestore is not configured, which keeps
-|                local development and any deployment that has not finished
-|                migrating working exactly as before.
-|
-| Reads come from an in-memory mirror rather than a query per screen. The
-| admin panels read orders from about twenty places that are all synchronous
-| today; making them await would mean rewriting every list screen and the
-| analytics that read them. The mirror is filled once at startup from
-| Firestore and updated by every write, so the collection is never
-| re-downloaded to render a screen. Firestore remains the source of truth:
-| the mirror is rebuilt from it on every boot, and nothing is written
-| only to memory.
-|
-| Because writes go to Firestore and then to the mirror, a Firestore failure
-| leaves the mirror untouched and reports ok:false. The order is never
-| reported as saved when it was not.
+| Writes go to the database and then to the mirror, so a failed write leaves
+| the mirror untouched and reports ok:false. An order is never reported as
+| saved when it was not.
 */
 
-const jsonStore = require("./jsonOrders");
-const firestoreStore = require("./ordersFirestore");
+const pgStore = require("./pgOrders");
 const {
-  shouldUseFirestore,
   getDb,
   describeStatus,
   healthCheck,
   closeDb,
   withTimeout,
   LOAD_TIMEOUT_MS,
-} = require("./firestore");
+  shouldUseDatabase: isDatabaseConfigured,
+} = require("./connection");
 
-let mode = "json";
 let mirror = [];
 let mirrorReady = false;
 
@@ -51,15 +44,19 @@ let onStorageFailure = async () => {};
 
 function setOrderStoreFailureHandler(handler) {
   onStorageFailure = handler;
-  jsonStore.setFailureHandler(handler);
 }
 
-function usingFirestore() {
-  return mode === "firestore";
+function usingDatabase() {
+  // Ask the configuration, not the pool: describeStatus() only reports
+  // "postgres" once the pool exists, and the first caller is the one
+  // creating that pool. A configured store must answer yes before its first
+  // connection, or a write during startup is refused as "not available".
+  return isDatabaseConfigured();
 }
 
 /**
- * Which store is in use, and why. Safe to print: no credential values.
+ * Which store is in use, and whether the mirror came up. Safe to print: no
+ * credential values.
  */
 function describe() {
   return { ...describeStatus(), mirrorReady, mirroredOrders: mirror.length };
@@ -67,87 +64,64 @@ function describe() {
 
 /**
  * Load the read mirror.
- *
- * On the JSON backend this is a no-op, because the file is already the
- * store. On Firestore the collection is read once here and never again
- * during normal running.
  */
 async function hydrate() {
-  if (!shouldUseFirestore()) {
-    mode = "json";
+  if (!usingDatabase()) {
+    mirror = [];
     mirrorReady = false;
 
-    // The file is the store here, so it is already loaded. Reporting the
-    // real count keeps the startup log honest.
-    return { mode, orders: jsonStore.getOrders().length };
-  }
-
-  const db = await getDb();
-
-  if (!db) {
-    // Configured but unreachable. Falling back keeps the shop trading
-    // instead of refusing every order until the config is fixed.
     console.warn(
-      "[DB] Firestore is configured but unreachable; using the JSON store"
+      "[DB] SUPABASE_DB_URL is not set, so the order store is empty. " +
+        "See database/schema.sql and .env.example."
     );
 
-    mode = "json";
-    mirrorReady = false;
-
-    return { mode, orders: jsonStore.getOrders().length };
+    return { mode: "json", orders: 0, ok: false };
   }
 
   try {
-    // Bounded, so an unreachable Firestore costs a warning rather than a
+    // Bounded, so an unreachable database costs a warning rather than a
     // bot that sits silent through start-up.
     mirror = await withTimeout(
-      firestoreStore.fetchAllOrders(),
+      pgStore.fetchAllOrders(),
       LOAD_TIMEOUT_MS,
-      "Loading orders from Firestore"
+      "Loading orders from PostgreSQL"
     );
 
-    // Oldest first, matching the order the JSON file had.
     mirror.sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
 
-    mode = "firestore";
     mirrorReady = true;
 
-    console.log(`[DB] Using Firestore, ${mirror.length} order(s) loaded`);
+    console.log(`[DB] Using PostgreSQL, ${mirror.length} order(s) loaded`);
 
-    return { mode, orders: mirror.length };
+    return { mode: "postgres", orders: mirror.length, ok: true };
   } catch (error) {
-    console.error(
-      "[DB] Could not load orders from Firestore, falling back to JSON:",
-      error.message
-    );
+    console.error(`[DB] Could not load orders: ${error.message}`);
 
-    mode = "json";
+    mirror = [];
     mirrorReady = false;
 
-    return { mode, orders: jsonStore.getOrders().length };
+    await onStorageFailure(error.message);
+
+    return { mode: "postgres", orders: 0, ok: false, error: error.message };
   }
 }
 
 function readOrders() {
-  if (usingFirestore()) {
-    // A mirror that never loaded is not an empty order book.
-    if (!mirrorReady) {
-      return {
-        ok: false,
-        orders: [],
-        error: "Firestore mirror is not loaded yet",
-      };
-    }
-
-    return { ok: true, orders: mirror.slice(), error: null };
+  // A mirror that never loaded is not an empty order book.
+  if (!mirrorReady) {
+    return {
+      ok: false,
+      orders: [],
+      error: "The order mirror is not loaded yet",
+    };
   }
 
-  return jsonStore.readOrders();
+  return { ok: true, orders: mirror.slice(), error: null };
 }
 
 /**
- * Orders for read-only screens. Returns [] when the store is unreadable so
- * a listing shows empty instead of crashing, but writes must not use this.
+ * Orders for read-only screens. Returns [] when the store is unreadable so a
+ * listing shows empty instead of crashing, but writes must not use this.
  */
 function getOrders() {
   const result = readOrders();
@@ -183,14 +157,15 @@ function dropFromMirror(orderId) {
  * a wrapper around the order.
  */
 async function mutateOrder(orderId, mutator, decision = {}) {
-  if (!usingFirestore()) {
-    return jsonStore.mutateOrder(orderId, mutator, decision);
+  if (!usingDatabase()) {
+    await onStorageFailure("The order store is not available");
+    return null;
   }
 
-  const result = await firestoreStore.updateOrder(orderId, mutator, decision);
+  const result = await pgStore.updateOrder(orderId, mutator, decision);
 
   if (!result.ok) {
-    console.error(`[ORDERS] Firestore update failed: ${result.error}`);
+    console.error(`[ORDERS] Update failed: ${result.error}`);
     await onStorageFailure(result.error);
 
     return null;
@@ -205,18 +180,22 @@ async function mutateOrder(orderId, mutator, decision = {}) {
 }
 
 /**
- * Add a new order. Refuses a duplicate id.
+ * Add a new order. Refuses a duplicate order number.
  */
 async function appendOrder(order) {
-  if (!usingFirestore()) {
-    return jsonStore.appendOrder(order);
+  if (!usingDatabase()) {
+    await onStorageFailure("The order store is not available");
+    return null;
   }
 
-  const result = await firestoreStore.createOrder(order);
+  const result = await pgStore.createOrder(order);
 
   if (!result.ok) {
-    console.error(`[ORDERS] Firestore create failed: ${result.error}`);
-    await onStorageFailure(result.error);
+    console.error(`[ORDERS] Create failed: ${result.error}`);
+
+    if (!result.duplicate) {
+      await onStorageFailure(result.error);
+    }
 
     return null;
   }
@@ -230,17 +209,17 @@ async function appendOrder(order) {
 |--------------------------------------------------------------------------
 | DIRECT QUERIES
 |--------------------------------------------------------------------------
-| These go to Firestore instead of the mirror. They are for the admin
+| These go to the database instead of the mirror. They are for the admin
 | screens that must show a large slice of the order book without loading it,
 | and for reports that should reflect committed data only.
 */
 
 async function getOrder(orderId) {
-  if (!usingFirestore()) {
+  if (!usingDatabase()) {
     return getOrders().find((o) => o.id === orderId) || null;
   }
 
-  const order = await firestoreStore.fetchOrder(orderId);
+  const order = await pgStore.fetchOrder(orderId);
 
   if (order) {
     replaceMirror(order);
@@ -250,21 +229,21 @@ async function getOrder(orderId) {
 }
 
 async function getUserOrders(userId) {
-  if (!usingFirestore()) {
-    return getOrders().filter((o) => o.userId === userId);
+  if (!usingDatabase()) {
+    return getOrders().filter((o) => String(o.userId) === String(userId));
   }
 
-  return firestoreStore.fetchUserOrders(userId);
+  return pgStore.fetchUserOrders(userId);
 }
 
 async function getOrdersByStatus(statuses) {
-  if (!usingFirestore()) {
+  if (!usingDatabase()) {
     const list = Array.isArray(statuses) ? statuses : [statuses];
 
     return getOrders().filter((o) => list.includes(o.status));
   }
 
-  return firestoreStore.fetchOrdersByStatus(statuses);
+  return pgStore.fetchOrdersByStatus(statuses);
 }
 
 /**
@@ -275,10 +254,10 @@ async function getPendingOrders() {
 }
 
 /**
- * Counts per state, taken from Firestore without loading the records.
+ * Counts per state, taken from the database without loading the records.
  */
 async function getOrderStats() {
-  if (!usingFirestore()) {
+  if (!usingDatabase()) {
     const orders = getOrders();
     const counts = {};
 
@@ -291,13 +270,12 @@ async function getOrderStats() {
     return { counts, total: orders.length, revenue: revenueOf(orders) };
   }
 
-  const counts = await firestoreStore.fetchStatusCounts();
-  const orders = mirror;
+  const counts = await pgStore.fetchStatusCounts();
 
   return {
     counts,
     total: Object.values(counts).reduce((sum, n) => sum + n, 0),
-    revenue: revenueOf(orders),
+    revenue: revenueOf(mirror),
   };
 }
 
@@ -321,7 +299,7 @@ module.exports = {
   getOrderStats,
   // Lifecycle.
   hydrate,
-  usingFirestore,
+  usingDatabase,
   describe,
   setOrderStoreFailureHandler,
   healthCheck,

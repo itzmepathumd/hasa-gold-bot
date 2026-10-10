@@ -21,12 +21,8 @@
 
 const https = require("https");
 
-const apilog = require("../apilog");
-
 const DEFAULT_BASE = "https://www.shop2topup.com";
 const DEFAULT_TIMEOUT = 15000;
-
-let requestCounter = 0;
 
 function request(method, path, options = {}) {
   const {
@@ -37,16 +33,10 @@ function request(method, path, options = {}) {
     logBody = true,
   } = options;
 
-  const requestId = `${Date.now()}-${++requestCounter}`;
-
   return new Promise((resolve, reject) => {
     if (!apiKey) {
       const error = new Error("SHOP2TOPUP_API_KEY not configured");
       error.code = "CONFIG_MISSING";
-      apilog.recordResponse(
-        apilog.recordRequest({ method, path, requestId, body }),
-        { error }
-      );
       return reject(error);
     }
 
@@ -56,10 +46,6 @@ function request(method, path, options = {}) {
       url = new URL(path, baseUrl);
     } catch (parseError) {
       parseError.code = "BAD_BASE_URL";
-      apilog.recordResponse(
-        apilog.recordRequest({ method, path, requestId, body }),
-        { error: parseError }
-      );
       return reject(parseError);
     }
 
@@ -83,13 +69,11 @@ function request(method, path, options = {}) {
       options2.headers["Content-Length"] = Buffer.byteLength(payload);
     }
 
-    const logEntry = apilog.recordRequest({
-      method,
-      path: url.pathname + url.search,
-      requestId,
-      body: logBody ? body : null,
-      headers: options2.headers,
-    });
+    console.log(`[SHOP2TOPUP] ${method} ${url.pathname}`);
+
+    if (payload && logBody) {
+      console.log(`[SHOP2TOPUP] Request body:`, payload);
+    }
 
     const req = https.request(options2, (res) => {
       let data = "";
@@ -105,12 +89,6 @@ function request(method, path, options = {}) {
           parsed = data;
         }
 
-        apilog.recordResponse(logEntry, {
-          statusCode: res.statusCode,
-          responseBody: parsed,
-          responseHeaders: res.headers,
-        });
-
         resolve({
           statusCode: res.statusCode,
           data: parsed,
@@ -120,7 +98,6 @@ function request(method, path, options = {}) {
     });
 
     req.on("error", (err) => {
-      apilog.recordResponse(logEntry, { error: err.message || String(err) });
       reject(err);
     });
 
@@ -128,7 +105,6 @@ function request(method, path, options = {}) {
       req.destroy();
       const error = new Error("Request timeout");
       error.code = "ETIMEDOUT";
-      apilog.recordResponse(logEntry, { error });
       reject(error);
     });
 

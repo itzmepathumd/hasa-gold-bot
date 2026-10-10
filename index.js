@@ -11,6 +11,8 @@ const botStatus = require("./status");
 const webhookServer = require("./webhookServer");
 const { Shop2TopupAdapter } = require("./src/shop2topup");
 const wallet = require("./src/wallet");
+const payments = require("./src/database/payments");
+const nexaura = require("./src/database/nexaura");
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_ID = Number(process.env.ADMIN_ID);
@@ -70,6 +72,28 @@ function ensureSession(ctx) {
   return ctx.session;
 }
 
+
+/*
+| Clear a half-finished order so its state cannot swallow a message belonging
+| to a new flow. A player check that failed for a transport reason keeps
+| waitingForPlayerId set on purpose, so a retry works with no extra taps; the
+| cost is that the flag survives the customer walking away to, say, the wallet
+| recharge flow. The player-ID handler runs before the wallet handler, so
+| without this the reference number typed there is read as a player ID.
+| Starting any wallet flow therefore drops the pending order.
+*/
+function clearPendingOrder(ctx) {
+  const session = ensureSession(ctx);
+
+  session.waitingForPlayerId = false;
+  session.gameId = null;
+  session.packageId = null;
+  session.playerId = null;
+  session.playerInfo = null;
+  session.pendingPlayerId = null;
+  session.pendingPlayerInfo = null;
+}
+
 bot.use(async (ctx, next) => {
   console.log(
     "📩 UPDATE:",
@@ -114,22 +138,106 @@ bot.use(async (ctx, next) => {
 | product, so those orders go to manual review rather than being sent a
 | guessed request.
 */
-const topupProvider = new Shop2TopupAdapter({
+const { NexauraTopupAdapter } = require("./src/nexauraTopup");
+
+const shop2topupProvider = new Shop2TopupAdapter({
   productionMode:
     process.env.SHOP2TOPUP_PRODUCTION_MODE === "true",
 
-  // The catalog is this file's business, not the provider module's, so the
-  // product behind an order is resolved here.
   resolveProduct: (order) => {
     if (!order?.gameId || !order?.productKey) {
       return null;
     }
 
     const found = catalog.findPackage(order.gameId, order.productKey);
-
     return found ? found.pkg : null;
   },
 });
+
+const nexauraTopupProvider = new NexauraTopupAdapter({
+  productionMode: true,
+  resolveProduct: (order) => {
+    if (!order?.gameId || !order?.productKey) {
+      return null;
+    }
+
+    const found = catalog.findPackage(order.gameId, order.productKey);
+    return found ? found.pkg : null;
+  },
+});
+
+/**
+ * Smart router that picks the right provider based on game.
+ * Free Fire -> Nexaura, everything else -> Shop2Topup.
+ */
+const topupProvider = {
+  async initialize() {
+    await shop2topupProvider.initialize();
+    await nexauraTopupProvider.initialize();
+  },
+
+  newOrderId() {
+    return shop2topupProvider.newOrderId();
+  },
+
+  canFulfill(order) {
+    if (order?.gameId === "free_fire") {
+      return nexauraTopupProvider.canFulfill(order);
+    }
+    return shop2topupProvider.canFulfill(order);
+  },
+
+  plan(order) {
+    if (order?.gameId === "free_fire") {
+      return nexauraTopupProvider.plan(order);
+    }
+    return shop2topupProvider.plan(order);
+  },
+
+  buildRequest(order) {
+    if (order?.gameId === "free_fire") {
+      return nexauraTopupProvider.buildRequest(order);
+    }
+    return shop2topupProvider.buildRequest(order);
+  },
+
+  async sendTopup(order) {
+    if (order?.gameId === "free_fire") {
+      return nexauraTopupProvider.sendTopup(order);
+    }
+    return shop2topupProvider.sendTopup(order);
+  },
+
+  async checkTopupStatus(order) {
+    if (order?.gameId === "free_fire") {
+      return nexauraTopupProvider.checkTopupStatus(order);
+    }
+    return shop2topupProvider.checkTopupStatus(order);
+  },
+
+  async cancelTopup(order) {
+    if (order?.gameId === "free_fire") {
+      return nexauraTopupProvider.cancelTopup(order);
+    }
+    return shop2topupProvider.cancelTopup(order);
+  },
+
+  isReady() {
+    return shop2topupProvider.isReady() || nexauraTopupProvider.isReady();
+  },
+
+  getStatus() {
+    return {
+      shop2topup: shop2topupProvider.getStatus(),
+      nexaura: nexauraTopupProvider.getStatus(),
+    };
+  },
+
+  async shutdown() {
+    await shop2topupProvider.shutdown();
+    await nexauraTopupProvider.shutdown();
+  },
+};
 
 const STORE_NAME = "HASA GOLD STORE";
 
@@ -185,7 +293,7 @@ function paymentInstructions() {
 | ORDER DATABASE
 |--------------------------------------------------------------------------
 | Orders are read and written only through the database layer, which uses
-| Firestore when it is configured and the JSON files otherwise. Nothing here
+| Supabase when SUPABASE_DB_URL is configured. Nothing here
 | touches a file directly any more.
 */
 
@@ -207,6 +315,60 @@ const {
   healthCheck: checkOrderStoreHealth,
   closeDb: closeOrderStore,
 } = require("./src/database/orders");
+
+/*
+|--------------------------------------------------------------------------
+| DATABASE REQUIRED
+|--------------------------------------------------------------------------
+| Orders, wallets and the catalogue all live in PostgreSQL. Without a
+| connection string the shop cannot remember an order, a balance or a
+| product, so it stops instead of trading on an empty store.
+|
+| The message names the exact variable and where to get its value, because
+| a bot that refuses to start with "database unavailable" is a support call,
+| while one that names SUPABASE_DB_URL is a two-minute fix.
+*/
+const ordersStore = require("./src/database/orders");
+
+async function requireDatabase() {
+  if (ordersStore.usingDatabase()) {
+    return true;
+  }
+
+  /*
+  | One real connection attempt, so the message names the cause rather than
+  | guessing between "not set" and "set but unreachable".
+  */
+  const health = await ordersStore.healthCheck().catch((error) => ({
+    ok: false,
+    error: error.message,
+  }));
+
+  if (health.ok) {
+    // Pool initialized successfully on health check
+    return true;
+  }
+
+  const why = { ...ordersStore.describe(), error: health.error || null };
+
+  console.error(
+    "\n❌ " +
+      (why.mode === "unavailable"
+        ? `Supabase is configured but unreachable: ${why.error}`
+        : "SUPABASE_DB_URL is not set, so the bot has no database") +
+      "\n\n" +
+      "   1. Create a project at https://supabase.com/dashboard\n" +
+      "   2. Open Project settings > Database and copy the connection string\n" +
+      "   3. Run the schema:\n" +
+      "        npm run db:schema\n" +
+      "   4. Put the string in .env as SUPABASE_DB_URL=postgresql://...\n\n" +
+      "   Verify it with: npm run db:check\n\n" +
+      "   The bot stops now because orders, wallets and the catalogue cannot\n" +
+      "   be stored without it. Nothing was traded on an empty database.\n"
+  );
+
+  process.exit(1);
+}
 
 /*
 | Tell the admin the order store is unusable, once per distinct reason.
@@ -755,6 +917,8 @@ bot.command("status", async (ctx) => {
 });
 
 bot.command("wallet", async (ctx) => {
+  clearPendingOrder(ctx);
+
   await ctx.reply(wallet.walletScreenText(ctx.from.id), {
     parse_mode: "Markdown",
     ...wallet.walletMenu(),
@@ -762,6 +926,7 @@ bot.command("wallet", async (ctx) => {
 });
 
 bot.command("recharge", async (ctx) => {
+  clearPendingOrder(ctx);
   ensureSession(ctx).walletFlow = { step: "amount" };
 
   await ctx.reply(wallet.rechargeAmountText(), {
@@ -999,6 +1164,8 @@ bot.action("status_refresh", async (ctx) => {
 bot.action("wallet", async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
 
+  clearPendingOrder(ctx);
+
   await ctx.editMessageText(wallet.walletScreenText(ctx.from.id), {
     parse_mode: "Markdown",
     ...wallet.walletMenu(),
@@ -1019,6 +1186,7 @@ bot.action("wallet_history", async (ctx) => {
 bot.action("recharge", async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
 
+  clearPendingOrder(ctx);
   ensureSession(ctx).walletFlow = { step: "amount" };
 
   await ctx.editMessageText(wallet.rechargeAmountText(), {
@@ -1033,11 +1201,12 @@ bot.action(/^recharge_(ez_cash|bank_transfer)$/, async (ctx) => {
   const method = ctx.match[1];
   const flow = ensureSession(ctx).walletFlow;
 
-  if (!flow || flow.step !== "amount") {
+  if (!flow || flow.step !== "method") {
     return ctx.reply("❌ Recharge flow expired. Use /recharge to start again.");
   }
 
   flow.method = method;
+  flow.step = "proof";
 
   await ctx.editMessageText(wallet.rechargeProofText(method, flow.amount), {
     parse_mode: "Markdown",
@@ -1055,6 +1224,29 @@ bot.action("recharge_cancel", async (ctx) => {
       [Markup.button.callback("🔙  BACK TO WALLET", "wallet")],
     ]),
   });
+});
+
+/*
+|--------------------------------------------------------------------------
+| EZ CASH AUTO VERIFY (direct from wallet menu)
+|--------------------------------------------------------------------------
+*/
+bot.action("recharge_ez_cash_auto", async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+
+  // Clear any existing flow and start auto-verify
+  clearPendingOrder(ctx);
+  ensureSession(ctx).walletFlow = { step: "rn" };
+
+  await ctx.editMessageText(
+    wallet.rechargeAutoVerifyText(0),
+    {
+      parse_mode: "Markdown",
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback("❌  CANCEL", "recharge_cancel")],
+      ]),
+    }
+  );
 });
 
 /*
@@ -1147,6 +1339,568 @@ async function handleWalletFlow(ctx, text) {
     }
 
     ensureSession(ctx).walletFlow = null;
+
+    /*
+    | The shop cannot credit what it cannot see. A recharge request that
+    | nobody is told about waits for an approval that never starts, so the
+    | proof is forwarded to the admin with the approve and reject buttons
+    | attached, the same way an order payment is.
+    */
+    try {
+      await bot.telegram.sendPhoto(
+        ADMIN_ID,
+        photo.file_id,
+        {
+          caption:
+            `\u{1F4B0} *RECHARGE REQUEST*\n\n` +
+            `━━━━━━━━━━━━━━━━━━\n\n` +
+            `\u{1F9FE} ${wallet.code(result.requestId)}\n` +
+            `\u{1F464} Customer: ${ctx.from.first_name || ""}\n` +
+            (ctx.from.username ? `\u{1F4F1} Username: @${esc(ctx.from.username)}\n` : "") +
+            `\u{1F4B3} Method: ${wallet.METHODS[flow.method]?.label || flow.method}\n` +
+            `\u{1F4B5} Amount: LKR ${wallet.formatLKR(flow.amount)}\n\n` +
+            `━━━━━━━━━━━━━━━━━━\n\n` +
+            `\u{23F3} Status:\nAWAITING APPROVAL`,
+          parse_mode: "Markdown",
+          reply_markup: {
+            inline_keyboard: [
+              [
+                {
+                  text: "✅ APPROVE",
+                  callback_data: `wallet_approve_${result.requestId}`,
+                },
+                {
+                  text: "❌ REJECT",
+                  callback_data: `wallet_reject_${result.requestId}`,
+                },
+              ],
+            ],
+          },
+        }
+      );
+    } catch (error) {
+      console.error("[WALLET] Admin notice failed:", error);
+    }
+
+    return ctx.reply(wallet.rechargeSubmittedText({ ...flow, id: result.requestId }), {
+      parse_mode: "Markdown",
+      ...wallet.walletMenu(),
+    });
+  }
+
+  if (flow.step === "rn") {
+    const rn = String(text || "").replace(/\s+/g, "");
+
+    if (!/^\d{14}$/.test(rn)) {
+      return ctx.reply(
+        `❌ *Invalid RN number*\n\n` +
+          `━━━━━━━━━━━━━━━━━━\n\n` +
+          `Send the *14-digit RN* from your\neZ Cash payment SMS.\n\n` +
+          `Example: 20261007123456`,
+        {
+          parse_mode: "Markdown",
+          ...cancelFlowButton(),
+        }
+      );
+    }
+
+    await ctx.reply(
+      `⏳ *Verifying payment...*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `Please wait while we verify your\neZ Cash RN: ${rn}`,
+      {
+        parse_mode: "Markdown",
+        ...cancelFlowButton(),
+      }
+    );
+
+    const verification = await nexaura.verifyEzCashDeposit(rn);
+
+    if (!verification.ok) {
+      return ctx.reply(
+        `❌ *Verification failed*\n\n` +
+          `━━━━━━━━━━━━━━━━━━\n\n` +
+          `${verification.error}\n\n` +
+          `Please check the RN and try again, or use /recharge.`,
+        {
+          parse_mode: "Markdown",
+          ...wallet.walletMenu(),
+        }
+      );
+    }
+
+    if (verification.status === "credited") {
+      /*
+      | Record the deposit before crediting anything, and refuse if this
+      | number was already credited. The RN is the only thing a customer
+      | controls, so without this a second attempt at the same RN would
+      | credit the same deposit twice.
+      */
+      let deposit = null;
+
+      try {
+        deposit = await payments.findProviderDeposit("nexaura", rn);
+      } catch (error) {
+        console.error(
+          `[PAYMENTS] Could not look up deposit ${rn}: ${error.message}`
+        );
+      }
+
+      if (!deposit) {
+        try {
+          const recorded = await payments.recordProviderDeposit({
+            provider: "nexaura",
+            referenceNumber: rn,
+            telegramId: ctx.from.id,
+            depositId: verification.depositId,
+            status: "verified",
+            amountLkr: verification.amount,
+          });
+
+          deposit = {
+            ...recorded,
+            userId: String(ctx.from.id),
+            depositId: verification.depositId,
+            status: recorded.ok ? recorded.status : "pending",
+            amountLkr: verification.amount,
+            creditedLkr: null,
+            walletTransactionId: null,
+            attempts: 1,
+          };
+        } catch (error) {
+          console.error(
+            `[PAYMENTS] Could not record deposit ${rn}: ${error.message}`
+          );
+        }
+      }
+
+      if (deposit && deposit.status === "credited") {
+        return ctx.reply(
+          `✅ *ALREADY CREDITED*\n\n` +
+            `━━━━━━━━━━━━━━━━━━\n\n` +
+            `This RN was already credited to a wallet.\n\n` +
+            `🔢 RN: ${rn}\n` +
+            `🆔 Deposit: ${deposit.depositId || verification.depositId}\n\n` +
+            `If you believe this is wrong, contact support\nwith the RN above.`,
+          {
+            parse_mode: "Markdown",
+            ...wallet.walletMenu(),
+          }
+        );
+      }
+
+      const result = await wallet.requestRecharge(
+        ctx.from.id,
+        verification.amount,
+        "ez_cash_auto",
+        `auto_verified:${verification.depositId}`
+      );
+
+      if (!result.ok) {
+        return ctx.reply(
+          `❌ *Recharge failed*\n\n` +
+            `━━━━━━━━━━━━━━━━━━\n\n` +
+            `${result.error}`,
+          {
+            parse_mode: "Markdown",
+            ...wallet.walletMenu(),
+          }
+        );
+      }
+
+      const approveResult = await wallet.approveRecharge(result.requestId, 0);
+
+      if (!approveResult.ok) {
+        return ctx.reply(
+          `⚠️ *Deposit verified but wallet credit failed*\n\n` +
+            `━━━━━━━━━━━━━━━━━━\n\n` +
+            `Please contact support with your RN: ${rn}\n\n` +
+            `Deposit ID: ${verification.depositId}`,
+          {
+            parse_mode: "Markdown",
+            ...wallet.walletMenu(),
+          }
+        );
+      }
+
+      // The credit is irreversible from here on, so the deposit is marked
+      // now: a retry finds this row and stops.
+      try {
+        await payments.markDepositCredited(
+          "nexaura",
+          rn,
+          approveResult.transactionId || 0,
+          verification.amount
+        );
+      } catch (error) {
+        console.error(
+          `[PAYMENTS] Could not mark deposit ${rn} as credited: ${error.message}`
+        );
+      }
+
+      ensureSession(ctx).walletFlow = null;
+
+      return ctx.reply(
+        `✅ *PAYMENT VERIFIED & CREDITED*\n\n` +
+          `━━━━━━━━━━━━━━━━━━\n\n` +
+          `💵 Amount: LKR ${wallet.formatLKR(verification.amount)}\n` +
+          `🔢 RN: ${rn}\n` +
+          `🆔 Deposit: ${verification.depositId}\n\n` +
+          `💰 New balance: LKR ${wallet.formatLKR(approveResult.balance)}\n\n` +
+          `Your wallet has been credited automatically.`,
+        {
+          parse_mode: "Markdown",
+          ...wallet.walletMenu(),
+        }
+      );
+    }
+
+    if (verification.status === "pending") {
+      const result = await wallet.requestRecharge(
+        ctx.from.id,
+        wallet.MIN_RECHARGE,
+        "ez_cash_auto",
+        `pending_verify:${verification.depositId}`
+      );
+
+      if (!result.ok) {
+        return ctx.reply(
+          `❌ *Recharge request failed*\n\n` +
+            `━━━━━━━━━━━━━━━━━━\n\n` +
+            `${result.error}`,
+          {
+            parse_mode: "Markdown",
+            ...wallet.walletMenu(),
+          }
+        );
+      }
+
+      ensureSession(ctx).walletFlow = null;
+
+      return ctx.reply(
+        `⏳ *PAYMENT PENDING*\n\n` +
+          `━━━━━━━━━━━━━━━━━━\n\n` +
+          `Your payment is being verified.\n` +
+          `This may take a few minutes due to\nSMS delays.\n\n` +
+          `🔢 RN: ${rn}\n` +
+          `🆔 Deposit: ${verification.depositId}\n\n` +
+          `We will credit your wallet automatically\nonce verified.\n\n` +
+          `Use /wallet to check your balance.`,
+        {
+          parse_mode: "Markdown",
+          ...wallet.walletMenu(),
+        }
+      );
+    }
+
+    return ctx.reply(
+      `❌ *Unexpected verification status*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `Status: ${verification.status}\n\n` +
+        `Please contact support.`,
+      {
+        parse_mode: "Markdown",
+        ...wallet.walletMenu(),
+      }
+    );
+  }
+
+  if (flow.step === "rn") {
+    const rn = String(text || "").replace(/\s+/g, "");
+
+    if (!/^\d{14}$/.test(rn)) {
+      return ctx.reply(
+        `❌ *Invalid RN number*\n\n` +
+          `━━━━━━━━━━━━━━━━━━\n\n` +
+          `Send the *14-digit RN* from your\neZ Cash payment SMS.\n\n` +
+          `Example: 20261007123456`,
+        {
+          parse_mode: "Markdown",
+          ...cancelFlowButton(),
+        }
+      );
+    }
+
+    await ctx.reply(
+      `⏳ *Verifying payment...*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `Please wait while we verify your\neZ Cash RN: ${rn}`,
+      {
+        parse_mode: "Markdown",
+        ...cancelFlowButton(),
+      }
+    );
+
+    const verification = await nexaura.verifyEzCashDeposit(rn);
+
+    if (!verification.ok) {
+      return ctx.reply(
+        `❌ *Verification failed*\n\n` +
+          `━━━━━━━━━━━━━━━━━━\n\n` +
+          `${verification.error}\n\n` +
+          `Please check the RN and try again, or use /recharge.`,
+        {
+          parse_mode: "Markdown",
+          ...wallet.walletMenu(),
+        }
+      );
+    }
+
+    if (verification.status === "credited") {
+      /*
+      | Record the deposit before crediting anything, and refuse if this
+      | number was already credited. The RN is the only thing a customer
+      | controls, so without this a second attempt at the same RN would
+      | credit the same deposit twice.
+      */
+      let deposit = null;
+
+      try {
+        deposit = await payments.findProviderDeposit("nexaura", rn);
+      } catch (error) {
+        console.error(
+          `[PAYMENTS] Could not look up deposit ${rn}: ${error.message}`
+        );
+      }
+
+      if (!deposit) {
+        try {
+          const recorded = await payments.recordProviderDeposit({
+            provider: "nexaura",
+            referenceNumber: rn,
+            telegramId: ctx.from.id,
+            depositId: verification.depositId,
+            status: "verified",
+            amountLkr: verification.amount,
+          });
+
+          deposit = {
+            ...recorded,
+            userId: String(ctx.from.id),
+            depositId: verification.depositId,
+            status: recorded.ok ? recorded.status : "pending",
+            amountLkr: verification.amount,
+            creditedLkr: null,
+            walletTransactionId: null,
+            attempts: 1,
+          };
+        } catch (error) {
+          console.error(
+            `[PAYMENTS] Could not record deposit ${rn}: ${error.message}`
+          );
+        }
+      }
+
+      if (deposit && deposit.status === "credited") {
+        return ctx.reply(
+          `✅ *ALREADY CREDITED*\n\n` +
+            `━━━━━━━━━━━━━━━━━━\n\n` +
+            `This RN was already credited to a wallet.\n\n` +
+            `🔢 RN: ${rn}\n` +
+            `🆔 Deposit: ${deposit.depositId || verification.depositId}\n\n` +
+            `If you believe this is wrong, contact support\nwith the RN above.`,
+          {
+            parse_mode: "Markdown",
+            ...wallet.walletMenu(),
+          }
+        );
+      }
+
+      const result = await wallet.requestRecharge(
+        ctx.from.id,
+        verification.amount,
+        "ez_cash_auto",
+        `auto_verified:${verification.depositId}`
+      );
+
+      if (!result.ok) {
+        return ctx.reply(
+          `❌ *Recharge failed*\n\n` +
+            `━━━━━━━━━━━━━━━━━━\n\n` +
+            `${result.error}`,
+          {
+            parse_mode: "Markdown",
+            ...wallet.walletMenu(),
+          }
+        );
+      }
+
+      const approveResult = await wallet.approveRecharge(result.requestId, 0);
+
+      if (!approveResult.ok) {
+        return ctx.reply(
+          `⚠️ *Deposit verified but wallet credit failed*\n\n` +
+            `━━━━━━━━━━━━━━━━━━\n\n` +
+            `Please contact support with your RN: ${rn}\n\n` +
+            `Deposit ID: ${verification.depositId}`,
+          {
+            parse_mode: "Markdown",
+            ...wallet.walletMenu(),
+          }
+        );
+      }
+
+      // The credit is irreversible from here on, so the deposit is marked
+      // now: a retry finds this row and stops.
+      try {
+        await payments.markDepositCredited(
+          "nexaura",
+          rn,
+          approveResult.transactionId || 0,
+          verification.amount
+        );
+      } catch (error) {
+        console.error(
+          `[PAYMENTS] Could not mark deposit ${rn} as credited: ${error.message}`
+        );
+      }
+
+      ensureSession(ctx).walletFlow = null;
+
+      return ctx.reply(
+        `✅ *PAYMENT VERIFIED & CREDITED*\n\n` +
+          `━━━━━━━━━━━━━━━━━━\n\n` +
+          `💵 Amount: LKR ${wallet.formatLKR(verification.amount)}\n` +
+          `🔢 RN: ${rn}\n` +
+          `🆔 Deposit: ${verification.depositId}\n\n` +
+          `💰 New balance: LKR ${wallet.formatLKR(approveResult.balance)}\n\n` +
+          `Your wallet has been credited automatically.`,
+        {
+          parse_mode: "Markdown",
+          ...wallet.walletMenu(),
+        }
+      );
+    }
+
+    if (verification.status === "pending") {
+      const result = await wallet.requestRecharge(
+        ctx.from.id,
+        wallet.MIN_RECHARGE,
+        "ez_cash_auto",
+        `pending_verify:${verification.depositId}`
+      );
+
+      if (!result.ok) {
+        return ctx.reply(
+          `❌ *Recharge request failed*\n\n` +
+            `━━━━━━━━━━━━━━━━━━\n\n` +
+            `${result.error}`,
+          {
+            parse_mode: "Markdown",
+            ...wallet.walletMenu(),
+          }
+        );
+      }
+
+      ensureSession(ctx).walletFlow = null;
+
+      return ctx.reply(
+        `⏳ *PAYMENT PENDING*\n\n` +
+          `━━━━━━━━━━━━━━━━━━\n\n` +
+          `Your payment is being verified.\n` +
+          `This may take a few minutes due to\nSMS delays.\n\n` +
+          `🔢 RN: ${rn}\n` +
+          `🆔 Deposit: ${verification.depositId}\n\n` +
+          `We will credit your wallet automatically\nonce verified.\n\n` +
+          `Use /wallet to check your balance.`,
+        {
+          parse_mode: "Markdown",
+          ...wallet.walletMenu(),
+        }
+      );
+    }
+
+    return ctx.reply(
+      `❌ *Unexpected verification status*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `Status: ${verification.status}\n\n` +
+        `Please contact support.`,
+      {
+        parse_mode: "Markdown",
+        ...wallet.walletMenu(),
+      }
+    );
+  }
+
+  if (flow.step === "proof") {
+    if (!ctx.message.photo) {
+      return ctx.reply(
+        `❌ *Payment proof required*\n\n` +
+          `━━━━━━━━━━━━━━━━━━\n\n` +
+          `Send a screenshot of your ${wallet.METHODS[flow.method]?.label || "payment"}.\n\n` +
+          `The photo must show the amount and transaction ID.`,
+        {
+          parse_mode: "Markdown",
+          ...cancelFlowButton(),
+        }
+      );
+    }
+
+    const photo = ctx.message.photo[ctx.message.photo.length - 1];
+    const paymentProof = `https://api.telegram.org/file/bot${BOT_TOKEN}/${photo.file_path}`;
+
+    const result = await wallet.requestRecharge(
+      ctx.from.id,
+      flow.amount,
+      flow.method,
+      paymentProof
+    );
+
+    if (!result.ok) {
+      return ctx.reply(
+        `❌ *Recharge failed*\n\n` +
+          `━━━━━━━━━━━━━━━━━━\n\n` +
+          `${result.error}`,
+        {
+          parse_mode: "Markdown",
+          ...wallet.walletMenu(),
+        }
+      );
+    }
+
+    ensureSession(ctx).walletFlow = null;
+
+    /*
+    | The shop cannot credit what it cannot see. A recharge request that
+    | nobody is told about waits for an approval that never starts, so the
+    | proof is forwarded to the admin with the approve and reject buttons
+    | attached, the same way an order payment is.
+    */
+    try {
+      await bot.telegram.sendPhoto(
+        ADMIN_ID,
+        photo[photo.length - 1].file_id,
+        {
+          caption:
+            `💰 *RECHARGE REQUEST*\n\n` +
+            `━━━━━━━━━━━━━━━━━━\n\n` +
+            `🧾 ${wallet.code(result.requestId)}\n` +
+            `👤 Customer: ${ctx.from.first_name || ""}\n` +
+            (ctx.from.username ? `📱 Username: @${esc(ctx.from.username)}\n` : "") +
+            `💳 Method: ${wallet.METHODS[flow.method]?.label || flow.method}\n` +
+            `💵 Amount: LKR ${wallet.formatLKR(flow.amount)}\n\n` +
+            `━━━━━━━━━━━━━━━━━━\n\n` +
+            `⏳ Status:\nAWAITING APPROVAL`,
+          parse_mode: "Markdown",
+          reply_markup: {
+            inline_keyboard: [
+              [
+                {
+                  text: "✅ APPROVE",
+                  callback_data: `wallet_approve_${result.requestId}`,
+                },
+                {
+                  text: "❌ REJECT",
+                  callback_data: `wallet_reject_${result.requestId}`,
+                },
+              ],
+            ],
+          },
+        }
+      );
+    } catch (error) {
+      console.error("[WALLET] Admin notice failed:", error);
+    }
 
     return ctx.reply(wallet.rechargeSubmittedText({ ...flow, id: result.requestId }), {
       parse_mode: "Markdown",
@@ -1626,6 +2380,14 @@ bot.on("text", async (ctx, next) => {
     const { requestId } = ctx.session.rejectFlow;
     const reason = ctx.message.text.trim().toLowerCase() === "/skip" ? null : ctx.message.text.trim();
 
+    const request = await wallet.getRecharge(requestId);
+
+    if (!request) {
+      ensureSession(ctx).rejectFlow = null;
+
+      return ctx.reply("❌ Recharge request not found.");
+    }
+
     const result = await wallet.rejectRecharge(requestId, ctx.from.id, reason);
 
     if (!result.ok) {
@@ -1633,6 +2395,23 @@ bot.on("text", async (ctx, next) => {
     }
 
     ensureSession(ctx).rejectFlow = null;
+
+    // The rejection is the one message the customer is waiting for, so it is
+    // sent rather than assumed; a failure here must not undo the rejection.
+    try {
+      await bot.telegram.sendMessage(
+        Number(request.userId),
+        `❌ *RECHARGE REJECTED*\n\n` +
+          `━━━━━━━━━━━━━━━━━━\n\n` +
+          `🧾 ${code(requestId)}\n\n` +
+          (reason ? `Reason: ${esc(reason)}\n\n` : "") +
+          `Nothing has been added to your wallet.\n\n` +
+          `Contact support if you think this is a mistake.`,
+        { parse_mode: "Markdown" }
+      );
+    } catch (error) {
+      console.error(`[WALLET] Rejection notice failed: ${error.message}`);
+    }
 
     return ctx.reply(
       `❌ *RECHARGE REJECTED*\n\n` +
@@ -1834,7 +2613,7 @@ bot.on("text", async (ctx, next) => {
       frame: 800,
       parseMode: "Markdown",
       work: async () => {
-        const result = await playerValidate.validateShop2TopupPlayer(playerId, pkg);
+        const result = await playerValidate.validateGamePlayer(game.id, playerId, pkg);
 
         // A rejected player ID is the API working correctly, so only a
         // transport or service failure counts against its health. Recording it
@@ -2366,11 +3145,20 @@ bot.action("pay_with_wallet", async (ctx) => {
   }
 
   const applied = await mutateOrder(orderId, (current) => {
-    current.status = "pending_approval";
+    current.status = "approved";
+    current.approvedAt = new Date().toISOString();
     current.paymentMethod = "wallet";
     current.walletTransactionId = result.transactionId;
     current.paymentProof = `wallet://${result.transactionId}`;
     current.paymentSubmittedAt = new Date().toISOString();
+    current.topupStatus = "ready_for_topup";
+    current.topupAttempts = 0;
+    current.topupStartedAt = null;
+    current.topupCompletedAt = null;
+    current.topupError = null;
+    current.topupRetryArmed = false;
+    current.providerStatus = null;
+    current.providerRaw = null;
 
     return current;
   });
@@ -2387,14 +3175,20 @@ bot.action("pay_with_wallet", async (ctx) => {
 
   ensureSession(ctx).waitingForPayment = false;
 
+  // Auto-trigger top-up for wallet payments
+  const automated = topupProvider.canFulfill(applied);
+  if (automated) {
+    setImmediate(() => processAutoTopup(orderId));
+  }
+
   await ctx.editMessageText(
     `✅ *PAYMENT CONFIRMED*\n\n` +
       `━━━━━━━━━━━━━━━━━━\n\n` +
       `🧾 Order: ${code(order.id)}\n` +
       `💰 Paid: LKR ${wallet.formatLKR(order.price)}\n` +
       `💳 Method: Wallet\n\n` +
-      `⏳ Your order is now pending approval.\n` +
-      `You will be notified once it is processed.`,
+      `${automated ? `🚀 Your top-up is now being processed.\n\n` : `⏳ Your order is approved and will be processed shortly.\n\n`}` +
+      `You will be notified once it is completed.`,
     {
       parse_mode: "Markdown",
       ...Markup.inlineKeyboard([
@@ -2432,6 +3226,11 @@ You can start a new order whenever you're ready.`,
 */
 
 bot.on("photo", async (ctx) => {
+  // Handle wallet recharge proof
+  if (ctx.session?.walletFlow?.step === "proof") {
+    return handleWalletFlow(ctx, "");
+  }
+
   const orderId = ctx.session?.orderId;
 
   if (!orderId) {
@@ -2960,6 +3759,8 @@ async function resolveTopupOrder(orderId, attempt = 1) {
       current.providerStatus = result.providerStatus || null;
 
       if (result.raw) {
+        // The provider's raw answer is one JSONB column. The row mapper
+        // strips undefined fields, which the driver would reject.
         current.providerRaw = result.raw;
       }
 
@@ -3652,11 +4453,15 @@ async function sendMyOrders(ctx, isEdit) {
     .reverse()
     .slice(0, 10)
     .forEach((order) => {
+      const paymentMethod = order.paymentMethod
+        ? order.paymentMethod.charAt(0).toUpperCase() + order.paymentMethod.slice(1)
+        : "Not set";
       message +=
         `🧾 *${esc(order.id)}*\n` +
         `📦 ${esc(order.productName)}\n` +
         `🆔 Player ID: ${code(order.playerId)}\n` +
         `💰 LKR ${Number(order.price).toLocaleString()}\n` +
+        `💳 ${paymentMethod}\n` +
         `${statusBadge(order.status)}\n\n`;
     });
 
@@ -3731,11 +4536,15 @@ function reviewQueueText() {
     `⚠️ ${reviewing.length} order(s) need a decision:\n\n`;
 
   for (const order of reviewing.slice(0, 10)) {
+    const paymentMethod = order.paymentMethod
+      ? order.paymentMethod.charAt(0).toUpperCase() + order.paymentMethod.slice(1)
+      : "Not set";
     text +=
       `🧾 ${esc(order.id)}\n` +
       `🎮 ${esc(order.gameName)}\n` +
       `📦 ${esc(order.productName)}\n` +
       `🆔 ${code(order.playerId)}\n` +
+      `💳 ${paymentMethod}\n` +
       `💬 ${esc(order.topupError || "not settled by the provider")}\n\n`;
   }
 
@@ -5215,11 +6024,15 @@ for approval.`,
     `━━━━━━━━━━━━━━━━━━\n\n`;
 
   for (const order of pending.slice(0, 10)) {
+    const paymentMethod = order.paymentMethod
+      ? order.paymentMethod.charAt(0).toUpperCase() + order.paymentMethod.slice(1)
+      : "Not set";
     message +=
       `🧾 ${esc(order.id)}\n` +
       `📦 ${esc(order.productName)}\n` +
       `🆔 ${code(order.playerId)}\n` +
-      `💰 LKR ${order.price.toLocaleString()}\n\n`;
+      `💰 LKR ${order.price.toLocaleString()}\n` +
+      `💳 ${paymentMethod}\n\n`;
   }
 
   const buttons = pending
@@ -5282,6 +6095,7 @@ bot.action(/^admin_order_(.+)$/, async (ctx) => {
     `📦 Product: ${order.productName}\n` +
     `🆔 Player ID: \`${order.playerId}\`\n` +
     `💰 Amount: LKR ${order.price.toLocaleString()}\n` +
+    `💳 ${order.paymentMethod ? order.paymentMethod.charAt(0).toUpperCase() + order.paymentMethod.slice(1) : "Not set"}\n` +
     `👤 Customer: ${customer}\n\n` +
     `${statusBadge(order.status)}`;
 
@@ -5352,6 +6166,39 @@ bot.action(/^admin_proof_(.+)$/, async (ctx) => {
     );
   }
 
+  if (order.paymentProof.startsWith("wallet://")) {
+    return ctx.reply(
+      `💳 *PAID FROM WALLET*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `🧾 ${esc(order.id)}\n` +
+        `📦 ${esc(order.productName)}\n` +
+        `💰 LKR ${order.price.toLocaleString()}\n\n` +
+        `This order was paid using the\ncustomer's wallet balance.\n` +
+        `No screenshot proof required.`,
+      {
+        parse_mode: "Markdown",
+        ...Markup.inlineKeyboard([
+          [
+            Markup.button.callback(
+              "✅  APPROVE",
+              `approve_${order.id}`
+            ),
+            Markup.button.callback(
+              "❌  REJECT",
+              `reject_${order.id}`
+            ),
+          ],
+          [
+            Markup.button.callback(
+              "🔙  ORDER DETAILS",
+              `admin_order_${order.id}`
+            ),
+          ],
+        ]),
+      }
+    );
+  }
+
   await ctx.replyWithPhoto(
     order.paymentProof,
     {
@@ -5416,10 +6263,14 @@ bot.action("admin_all_orders", async (ctx) => {
     `━━━━━━━━━━━━━━━━━━\n\n`;
 
   for (const order of latest) {
+    const paymentMethod = order.paymentMethod
+      ? order.paymentMethod.charAt(0).toUpperCase() + order.paymentMethod.slice(1)
+      : "Not set";
     message +=
       `🧾 ${esc(order.id)}\n` +
       `📦 ${esc(order.productName)}\n` +
       `💰 LKR ${order.price.toLocaleString()}\n` +
+      `💳 ${paymentMethod}\n` +
       `${statusBadge(order.status)}\n\n`;
   }
 
@@ -5530,6 +6381,31 @@ bot.action(/^wallet_proof_(.+)$/, async (ctx) => {
     return ctx.reply("❌ This request has no proof attached.");
   }
 
+  if (
+    request.paymentProof.startsWith("auto_verified:") ||
+    request.paymentProof.startsWith("pending_verify:")
+  ) {
+    const depositId = request.paymentProof.split(":")[1];
+    const statusLabel = request.paymentProof.startsWith("auto_verified:")
+      ? "Auto Verified"
+      : "Pending Verification";
+
+    return ctx.reply(
+      `⚡ *EZ CASH AUTO VERIFY*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `💰 Amount: LKR ${wallet.formatLKR(request.amount)}\n` +
+        `🔢 RN: ${depositId}\n` +
+        `👤 ${request.userId}\n` +
+        `📅 ${new Date(request.createdAt).toLocaleString()}\n\n` +
+        `Status: ${statusLabel}\n\n` +
+        `${request.paymentProof.startsWith("auto_verified:") ? "✅ Payment was verified by Nexaura API and wallet was credited." : "⏳ Payment is pending verification with the payment network."}`,
+      {
+        parse_mode: "Markdown",
+        ...wallet.rechargeReviewMenu(request),
+      }
+    );
+  }
+
   await ctx.replyWithPhoto(request.paymentProof, {
     caption:
       `💰 PROOF FOR ${wallet.formatLKR(request.amount)}\n\n` +
@@ -5547,6 +6423,16 @@ bot.action(/^wallet_approve_(.+)$/, async (ctx) => {
 
   const requestId = ctx.match[1];
 
+  // The notice goes to the customer, so the customer has to be read back
+  // before the approval is applied. The request id is a business key such as
+  // RCH-123-ABC, and sending to it addressed a chat that does not exist, so
+  // the credit succeeded silently while the customer never heard about it.
+  const request = await wallet.getRecharge(requestId);
+
+  if (!request) {
+    return ctx.reply("❌ Recharge request not found.");
+  }
+
   const result = await wallet.approveRecharge(requestId, ctx.from.id);
 
   if (!result.ok) {
@@ -5555,7 +6441,7 @@ bot.action(/^wallet_approve_(.+)$/, async (ctx) => {
 
   try {
     await bot.telegram.sendMessage(
-      requestId,
+      Number(request.userId),
       `✅ *RECHARGE APPROVED*\n\n` +
         `━━━━━━━━━━━━━━━━━━\n\n` +
         `💵 LKR ${wallet.formatLKR(result.amount || 0)} has been\n` +
@@ -6181,8 +7067,15 @@ let webhookHandle = null;
 let transport = "polling";
 
 async function startBot() {
-  // The order store decides itself, and loading it has to finish before
-  // recovery runs so recovery reads the same data the screens will.
+  // Without a database the shop cannot store an order or a wallet balance,
+  // and a bot that accepts orders it cannot remember is worse than one that
+  // refuses to start. The schema and the connection string are both one
+  // setup step; refusing here makes a missing one obvious on the first boot.
+  await requireDatabase();
+
+  // The order store reads its whole mirror at once, and loading it has to
+  // finish before recovery runs so recovery reads the same data the screens
+  // will.
   const store = await hydrateOrders();
 
   console.log(`[DB] Order store: ${store.mode} (${store.orders} order(s))`);
@@ -6192,6 +7085,17 @@ async function startBot() {
   } catch (error) {
     console.error(
       "[WALLETS] Hydration failed:",
+      error.message
+    );
+  }
+
+  // The catalogue is served from memory, so it has to be loaded before the
+  // provider is initialised and before a customer can pick a package.
+  try {
+    await catalog.hydrate();
+  } catch (error) {
+    console.error(
+      "[CATALOG] Hydration failed:",
       error.message
     );
   }
@@ -6347,6 +7251,10 @@ async function shutdown(signal) {
   stopTopupResolutions();
 
   await topupProvider.shutdown();
+
+  // A catalogue edit is queued, so the last one is waited for rather than
+  // left in flight when the process ends.
+  await catalog.flush().catch(() => {});
 
   await closeOrderStore();
 
@@ -6652,6 +7560,7 @@ bot.on("text", async (ctx) => {
   }
 
   if (target === "recharge") {
+    clearPendingOrder(ctx);
     ensureSession(ctx).walletFlow = { step: "amount" };
 
     return ctx.reply(wallet.rechargeAmountText(), {

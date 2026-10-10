@@ -12,9 +12,8 @@
 #   ADMIN_ID           your Telegram user id
 #   WEBHOOK_SECRET     any long random string; keep it identical to whatever
 #                      you also set on other instances of this service
-#   FIREBASE_CLIENT_EMAIL
-#   FIREBASE_PRIVATE_KEY
-#   GOOGLE_APPLICATION_CREDENTIALS  only if you mount a key file instead
+#   SUPABASE_DB_URL    connection string from Supabase > Project settings >
+#                      Database; keep the password out of git
 #
 # The webhook URL cannot be written here either, because Render assigns the
 # hostname after the first deploy. Set WEBHOOK_URL to the service's public URL
@@ -32,8 +31,6 @@ services:
     envVars:
       - key: NODE_VERSION
         value: "22"
-      - key: FIRESTORE_TRANSPORT
-        value: auto
       # Free plans sleep after a period without traffic, and a sleeping bot
       # answers nobody. Either upgrade to a paid instance or keep it awake with
       # an outside pinger (UptimeRobot, cron-job.org) hitting /healthz every

@@ -1,36 +1,94 @@
 const fs = require("fs");
 const crypto = require("crypto");
 
+const products = require("./src/database/products");
+
 const CATALOG_FILE = "./catalog.json";
 
-const firestoreProducts = require("./src/database/products");
+/*
+| The catalogue in memory. When PostgreSQL is configured this is the copy
+| loaded from it at startup and mutated in place afterwards, so every read
+| stays synchronous while the rows stay in the database. Without PostgreSQL
+| it is never set and every read goes to catalog.json, exactly as before.
+*/
+let memoryCatalog = null;
 
-async function syncProductToFirestore(game, pkg) {
+/*
+| Writes are queued so two admin edits arriving together cannot interleave
+| and let one overwrite a change the other already sent.
+*/
+let persistenceChain = Promise.resolve();
+
+/**
+ * Load the catalogue from PostgreSQL, or keep catalog.json when no database
+ * is configured. Safe to call more than once; the in-memory copy is replaced.
+ */
+async function hydrate() {
+  memoryCatalog = null;
+
+  if (!products.shouldUseDatabase()) {
+    console.log("[CATALOG] Using catalog.json");
+
+    return { mode: "json", ...counts(readCatalog()) };
+  }
+
   try {
-    const db = require("./src/database/firestore").getDb();
+    const fromDatabase = await products.fetchCatalog();
 
-    if (!db) {
-      return;
+    if (!fromDatabase) {
+      throw new Error("the catalogue could not be read");
     }
 
-    await firestoreProducts.writeProduct(game, pkg);
+    memoryCatalog = fromDatabase;
+
+    if (fromDatabase.games.length === 0 && fromDatabase.payments.length === 0) {
+      console.warn(
+        "[CATALOG] The catalogue in PostgreSQL is empty. Load one with " +
+          "`node scripts/seed-catalog.js` or add games from the admin panel, " +
+          "otherwise customers will see no products."
+      );
+    }
+
+    console.log(
+      `[CATALOG] Using PostgreSQL, ${fromDatabase.games.length} game(s), ` +
+        `${fromDatabase.games.reduce((total, g) => total + g.packages.length, 0)} package(s), ` +
+        `${fromDatabase.payments.length} payment method(s)`
+    );
+
+    return { mode: "postgres", ...counts(fromDatabase) };
   } catch (error) {
-    console.error("[CATALOG] Firestore product sync failed:", error.message);
+    console.error(
+      `[CATALOG] Could not read the catalogue from PostgreSQL (${error.message}); ` +
+        "falling back to catalog.json"
+    );
+
+    memoryCatalog = null;
+
+    return { mode: "json", error: error.message, ...counts(readCatalog()) };
   }
 }
 
-async function syncPaymentToFirestore(payment) {
-  try {
-    const db = require("./src/database/firestore").getDb();
+function counts(catalog) {
+  return {
+    games: catalog.games.length,
+    payments: catalog.payments.length,
+  };
+}
 
-    if (!db) {
-      return;
-    }
+/**
+ * Wait until every queued write has reached the database. Used on shutdown
+ * and by the tests.
+ */
+async function flush() {
+  const pending = persistenceChain;
+  persistenceChain = Promise.resolve();
 
-    await firestoreProducts.writePaymentMethod(payment);
-  } catch (error) {
-    console.error("[CATALOG] Firestore payment sync failed:", error.message);
-  }
+  return pending;
+}
+
+/** True once PostgreSQL is the store, so no write touches the JSON file. */
+function usingDatabase() {
+  return Boolean(memoryCatalog) && products.shouldUseDatabase();
 }
 
 /*
@@ -176,6 +234,10 @@ const DEFAULT_CATALOG = {
 |--------------------------------------------------------------------------
 */
 function readCatalog() {
+  if (memoryCatalog) {
+    return memoryCatalog;
+  }
+
   if (!fs.existsSync(CATALOG_FILE)) {
     saveCatalog(DEFAULT_CATALOG);
     return structuredClone(DEFAULT_CATALOG);
@@ -199,10 +261,37 @@ function saveCatalog(catalog) {
   fs.writeFileSync(CATALOG_FILE, JSON.stringify(catalog, null, 2));
 }
 
+/**
+ * Send the whole catalogue to PostgreSQL. Queued, so a second edit cannot
+ * start writing while the first one is still in flight.
+ */
+function queuePersist(catalog) {
+  const snapshot = structuredClone(catalog);
+
+  persistenceChain = persistenceChain
+    .then(() => products.syncCatalog(snapshot))
+    .then((result) => {
+      if (!result.ok) {
+        console.error(`[CATALOG] Write to PostgreSQL failed: ${result.error}`);
+      }
+    })
+    .catch((error) => {
+      console.error(`[CATALOG] Write to PostgreSQL failed: ${error.message}`);
+    });
+
+  return persistenceChain;
+}
+
 function update(mutator) {
   const catalog = readCatalog();
   const result = mutator(catalog);
-  saveCatalog(catalog);
+
+  if (usingDatabase()) {
+    queuePersist(catalog);
+  } else {
+    saveCatalog(catalog);
+  }
+
   return result;
 }
 
@@ -329,10 +418,6 @@ function updateGame(gameId, patch) {
     return game;
   });
 
-  if (result) {
-    syncProductToFirestore(result, {});
-  }
-
   return result;
 }
 
@@ -399,14 +484,6 @@ function updatePackage(gameId, packageId, patch) {
 
     return pkg;
   });
-
-  if (result) {
-    const game = getGame(gameId);
-
-    if (game) {
-      syncProductToFirestore(game, result);
-    }
-  }
 
   return result;
 }
@@ -485,10 +562,6 @@ function updatePayment(paymentId, patch) {
     return payment;
   });
 
-  if (result) {
-    syncPaymentToFirestore(result);
-  }
-
   return result;
 }
 
@@ -508,6 +581,9 @@ function deletePayment(paymentId) {
 
 module.exports = {
   DEFAULT_CATALOG,
+  hydrate,
+  flush,
+  usingDatabase,
   readCatalog,
   saveCatalog,
   shortId,

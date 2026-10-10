@@ -27,8 +27,8 @@ Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/hasa-gold-bot
 
-# The bot has to be able to reach api.telegram.org, firestore.googleapis.com
-# and the SHOP2TOPUP API. Long polling means nothing has to come inbound.
+# The bot has to be able to reach api.telegram.org, the Supabase PostgreSQL
+# host and the SHOP2TOPUP API. Long polling means nothing has to come inbound.
 ExecStart=/usr/bin/node index.js
 
 Environment=NODE_ENV=production

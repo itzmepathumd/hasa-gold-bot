@@ -14,6 +14,7 @@
 */
 
 const { request: shop2topupRequest } = require("./src/shop2topup/http");
+const nexaura = require("./src/database/nexaura");
 
 const API_BASE = process.env.SHOP2TOPUP_API_BASE || "https://www.shop2topup.com";
 const API_KEY = process.env.SHOP2TOPUP_API_KEY;
@@ -326,10 +327,74 @@ async function validateShop2TopupPlayer(playerId, product) {
 
 /*
 |--------------------------------------------------------------------------
+| NEXAURA PLAYER VALIDATION (FREE FIRE)
+|--------------------------------------------------------------------------
+| Free Fire is a Nexaura game, so its player check goes to Nexaura's own
+| /players/:uid lookup rather than to SHOP2TOPUP. Same return shape as
+| validateShop2TopupPlayer, so the caller handles one contract.
+*/
+async function validateNexauraPlayer(playerId) {
+  const result = await nexaura.validatePlayer(playerId);
+
+  if (result.ok) {
+    return {
+      success: true,
+      playerId: result.playerUid,
+      playerName: result.playerName,
+      region: result.region,
+    };
+  }
+
+  // Map Nexaura codes onto the vocabulary the bot already renders.
+  const code = String(result.code || "").toUpperCase();
+
+  let error = "UNKNOWN";
+
+  if (code === "INVALID_PLAYER_UID") {
+    error = "INVALID_PARAMETER";
+  } else if (code === "LOOKUP_UNAVAILABLE") {
+    error = "PLAYER_CHECK_UNAVAILABLE";
+  } else if (code === "NETWORK_ERROR" || code.startsWith("HTTP_")) {
+    error = "NETWORK_ERROR";
+  } else if (code === "PLAYER_NOT_FOUND") {
+    error = "PLAYER_NOT_FOUND";
+  } else if (code === "CONFIG_MISSING") {
+    error = "CONFIG_MISSING";
+  }
+
+  return {
+    success: false,
+    error,
+    message: result.error || "Validation failed",
+    retryable: Boolean(result.retryable),
+  };
+}
+
+/*
+|--------------------------------------------------------------------------
+| VALIDATE PLAYER BY GAME
+|--------------------------------------------------------------------------
+| One entry point the bot calls. The supplier is chosen by the game, because
+| Free Fire top-ups are placed through Nexaura and Blood Strike through
+| SHOP2TOPUP, and a player check should come from the supplier that will
+| actually deliver the order.
+*/
+async function validateGamePlayer(gameId, playerId, product) {
+  if (String(gameId) === "free_fire") {
+    return validateNexauraPlayer(playerId);
+  }
+
+  return validateShop2TopupPlayer(playerId, product);
+}
+
+/*
+|--------------------------------------------------------------------------
 | EXPORTS
 |--------------------------------------------------------------------------
 */
 module.exports = {
+  validateGamePlayer,
+  validateNexauraPlayer,
   validateShop2TopupPlayer,
   fetchSubcategories,
   fetchRequirements,

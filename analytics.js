@@ -42,7 +42,9 @@ function when(iso) {
   if (!iso) return "—";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";
-  return d.toISOString().slice(0, 16).replace("T", " ");
+  // Sri Lanka timezone UTC+5:30
+  const slTime = new Date(d.getTime() + 5.5 * 60 * 60 * 1000);
+  return slTime.toISOString().slice(0, 16).replace("T", " ") + " (SLT)";
 }
 
 /*

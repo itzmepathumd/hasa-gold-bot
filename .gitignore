@@ -3,38 +3,32 @@ node_modules/
 # A half-written temp file must never be committed.
 orders.json.tmp
 
-# Wallet runtime files. The seed files are written by the
-# store itself on first boot, so they are state, not source,
-# and a deployment's balances must never enter git.
-wallets.json
-wallets.json.tmp
-wallets.prev.json
-wallet_transactions.json
-wallet_transactions.json.tmp
-wallet_transactions.prev.json
-recharge_requests.json
-recharge_requests.json.tmp
-recharge_requests.prev.json
-
 # ---------------------------------------------------------------------------
-# Firebase credentials
+# Database secrets
 # ---------------------------------------------------------------------------
-# A downloaded service account key must never enter git, in any of the names
-# Firebase, the Google console or a hosting platform might give it. These
-# patterns cover the common ones so the key cannot be committed by accident.
-*-firebase-adminsdk-*.json
-*service-account*.json
-*serviceAccount*.json
-firebase-service-credentials.json
-gcp-key.json
-credentials.json
-
-# Real credentials, never tracked. A tracked .env leaked a live bot token
-# and supplier API key into history, and it is what made it easy to write a
-# deployment .env with invented values that only failed at runtime.
-# .env.example is the tracked template; .env is created per machine.
+# The Supabase connection string carries the database password. A .env holding
+# it must never enter git, and so must a downloaded key or a credential dump
+# from any provider, under the names they are normally given.
 .env
-
-# Local environment overrides.
 .env.local
 .env.*.local
+*.pem
+*service-account*.json
+*serviceAccount*.json
+credentials.json
+
+# ---------------------------------------------------------------------------
+# Local leftovers
+# ---------------------------------------------------------------------------
+# The bot no longer writes these; the patterns stay so a file copied from an
+# older install is not committed by accident.
+orders.json
+orders.json.tmp
+orders.prev.json
+wallets.json
+wallet_transactions.json
+recharge_requests.json
+*.log
+
+# Runtime log the systemd unit writes; it holds chat ids and is noise.
+bot.log

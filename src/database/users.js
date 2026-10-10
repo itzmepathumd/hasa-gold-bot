@@ -2,23 +2,25 @@
 |--------------------------------------------------------------------------
 | USER RECORDS
 |--------------------------------------------------------------------------
-| One document per Telegram user, keyed by the numeric user id.
+| One row per Telegram user, with telegram_id as the primary business key.
 |
 | Only what the store actually needs is kept: enough to address the customer
 | and to recognise them again. No payment details, no message history and
 | nothing the shop does not use.
 |
-| The document id is the Telegram id, which keeps the ids stable across a
-| migration and means an upsert can never create a second record for the
-| same person.
+| The customer row is created by the first write that needs it, which is why
+| every write path calls ensure_user(): a wallet credit for a user the bot
+| has never seen, an order, and a recharge all need the row to exist before
+| a foreign key can point at it.
 |
-| Wallet fields are stored on the user document for convenience:
-|
-|   walletBalance     current balance, kept in sync by creditWallet/debitWallet
-|   walletLastUpdated ISO timestamp of the last wallet change
+| The balance is stored here and is never written by application code. Only
+| wallet_credit(), wallet_debit() and approve_recharge() in
+| database/schema.sql may change it, and each of them writes the matching
+| ledger row in the same transaction.
 */
 
-const { getDb } = require("./firestore");
+const { getDb } = require("./connection");
+const { walletFromRow } = require("./mappers");
 
 const COLLECTION = "users";
 
@@ -33,77 +35,51 @@ function nowIso() {
  * id is required; the rest fills in as it becomes known.
  */
 async function upsertUser({ userId, username, firstName, lastName, walletBalance }) {
-  const db = await getDb();
-
-  if (!db) {
-    return { ok: false, error: "Firestore is not available" };
-  }
-
   if (!userId) {
     return { ok: false, error: "userId is required" };
   }
 
-  const ref = db.collection(COLLECTION).doc(String(userId));
-  const fields = { updatedAt: nowIso() };
+  const db = await getDb();
 
-  // Only overwrite a name when a real one was supplied, so a message with no
-  // signature cannot blank out what we already know.
-  if (username !== undefined && username !== null && username !== "") {
-    fields.username = username;
-  }
-
-  if (firstName) {
-    fields.firstName = firstName;
-  }
-
-  if (lastName !== undefined) {
-    fields.lastName = lastName || null;
-  }
-
-  if (walletBalance !== undefined) {
-    fields.walletBalance = Number(walletBalance);
-    fields.walletLastUpdated = nowIso();
+  if (!db) {
+    return { ok: false, error: "Supabase is not available" };
   }
 
   try {
-    // createdAt must survive every later visit, so it is only written the
-    // first time. data() is undefined for a document that does not exist,
-    // which is the normal case on a customer's first order.
-    const existing = await ref.get();
-    const createdAt =
-      existing.exists && existing.data() && existing.data().createdAt
-        ? existing.data().createdAt
-        : nowIso();
+    // A name already stored is never blanked by an update that carries no
+    // name, so a message with no signature cannot erase what we know.
+    await db.query(`SELECT ensure_user($1, $2, $3)`, [
+      Number(userId),
+      username || null,
+      firstName || null,
+    ]);
 
-    await ref.set(
-      {
-        telegramUserId: Number(userId),
-        ...fields,
-        createdAt,
-      },
-      { merge: true }
-    );
+    if (lastName !== undefined) {
+      await db.query(
+        `UPDATE users SET last_name = $2 WHERE telegram_id = $1`,
+        [Number(userId), lastName || null]
+      );
+    }
+
+    if (walletBalance !== undefined) {
+      // Balance is moved by wallet_credit/wallet_debit, which also record the
+      // ledger entry; this path only exists so a test or an operator can set
+      // an opening figure, and it writes a ledger row to keep the two in step.
+      await db.query(
+        `SELECT wallet_credit($1, GREATEST($2 - COALESCE((SELECT balance FROM users WHERE telegram_id = $1), 0), 0),
+                'Opening balance adjustment', 'user', $1::text, 'balance_adjustment', $3)`,
+        [
+          Number(userId),
+          Number(walletBalance),
+          `adjust:${Number(userId)}:${nowIso()}`,
+        ]
+      );
+    }
 
     return { ok: true, error: null };
   } catch (error) {
     return { ok: false, error: error.message };
   }
-}
-
-/**
- * Derive a user record from an order, so migrating old orders also brings
- * the customer list across.
- */
-async function upsertUserFromOrder(order) {
-  if (!order || !order.userId) {
-    return { ok: false, error: "order has no userId" };
-  }
-
-  return upsertUser({
-    userId: order.userId,
-    username: order.username,
-    firstName: order.firstName,
-  });
 }
 
 async function getUser(userId) {
@@ -114,13 +90,15 @@ async function getUser(userId) {
   }
 
   try {
-    const snapshot = await db.collection(COLLECTION).doc(String(userId)).get();
+    const { rows } = await db.query(
+      `SELECT telegram_id, username, first_name, last_name, balance, role,
+              is_banned, created_at, updated_at
+         FROM users
+        WHERE telegram_id = $1`,
+      [Number(userId)]
+    );
 
-    if (!snapshot.exists) {
-      return null;
-    }
-
-    return { id: snapshot.id, ...snapshot.data() };
+    return rows.length ? walletFromRow({ ...rows[0], first_name: rows[0].first_name }) : null;
   } catch (error) {
     console.error(`[USERS] Read failed: ${error.message}`);
 
@@ -136,9 +114,16 @@ async function listUsers(limit = 500) {
   }
 
   try {
-    const snapshot = await db.collection(COLLECTION).limit(limit).get();
+    const { rows } = await db.query(
+      `SELECT telegram_id, username, first_name, last_name, balance, role,
+              is_banned, created_at, updated_at
+         FROM users
+        ORDER BY created_at DESC
+        LIMIT $1`,
+      [Number(limit)]
+    );
 
-    return snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+    return rows.map((row) => walletFromRow(row));
   } catch (error) {
     console.error(`[USERS] List failed: ${error.message}`);
 
@@ -154,9 +139,9 @@ async function countUsers() {
   }
 
   try {
-    const snapshot = await db.collection(COLLECTION).select().get();
+    const { rows } = await db.query(`SELECT COUNT(*)::int AS total FROM users`);
 
-    return snapshot.size;
+    return Number(rows[0].total) || 0;
   } catch (error) {
     console.error(`[USERS] Count failed: ${error.message}`);
 
@@ -164,11 +149,68 @@ async function countUsers() {
   }
 }
 
+async function setBanned(userId, banned) {
+  const db = await getDb();
+
+  if (!db) {
+    return { ok: false, error: "Supabase is not available" };
+  }
+
+  try {
+    await db.query(`UPDATE users SET is_banned = $2 WHERE telegram_id = $1`, [
+      Number(userId),
+      Boolean(banned),
+    ]);
+
+    await db.query(
+      `INSERT INTO admin_logs (admin_id, action, target, detail)
+       VALUES (NULL, $1, $2, $3::jsonb)`,
+      [
+        Boolean(banned) ? "user_banned" : "user_unbanned",
+        String(userId),
+        JSON.stringify({ telegram_id: Number(userId), banned: Boolean(banned) }),
+      ]
+    );
+
+    return { ok: true, error: null };
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
+}
+
+async function logAdminAction(adminId, action, target, detail) {
+  const db = await getDb();
+
+  if (!db) {
+    return { ok: false };
+  }
+
+  try {
+    await db.query(
+      `INSERT INTO admin_logs (admin_id, action, target, detail)
+       VALUES ($1, $2, $3, $4::jsonb)`,
+      [
+        Number(adminId),
+        String(action),
+        target ? String(target) : null,
+        detail ? JSON.stringify(detail) : null,
+      ]
+    );
+
+    return { ok: true };
+  } catch (error) {
+    console.error(`[ADMIN-LOG] Could not record ${action}: ${error.message}`);
+
+    return { ok: false };
+  }
+}
+
 module.exports = {
   COLLECTION,
   upsertUser,
-  upsertUserFromOrder,
   getUser,
   listUsers,
   countUsers,
+  setBanned,
+  logAdminAction,
 };

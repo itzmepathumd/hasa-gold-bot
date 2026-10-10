@@ -10,6 +10,14 @@ const telegraf = require("telegraf");
 
 require("dotenv").config();
 
+/*
+| The bot refuses to start without a token, so the tests supply a fake one.
+| Every Telegram call in these tests is stubbed, so nothing reaches the
+| network with it.
+*/
+process.env.BOT_TOKEN = process.env.BOT_TOKEN || "123456:FAKE_TOKEN_FOR_TESTS";
+process.env.ADMIN_ID = process.env.ADMIN_ID || "1";
+
 telegraf.Telegraf.prototype.launch = function () {};
 
 const ADMIN_ID = Number(process.env.ADMIN_ID || 1);

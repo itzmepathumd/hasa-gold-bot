@@ -21,7 +21,33 @@ const os = require("os");
 
 require("dotenv").config();
 
+/*
+| The bot refuses to start without a token, so the tests supply a fake one.
+| Every Telegram call in these tests is stubbed, so nothing reaches the
+| network with it.
+*/
+process.env.BOT_TOKEN = process.env.BOT_TOKEN || "123456:FAKE_TOKEN_FOR_TESTS";
+process.env.ADMIN_ID = process.env.ADMIN_ID || "1";
+
 telegraf.Telegraf.prototype.launch = function () {};
+
+/*
+| This test drives the real order database, so it needs one. A local
+| PostgreSQL with the schema loaded is enough; a Supabase project works too.
+| Without a database the test cannot run, and it says so rather than passing
+| on an empty store.
+*/
+const connection = require("./src/database/connection");
+
+if (!connection.shouldUseDatabase()) {
+  console.log(
+    "\n== WALLET FLOW TEST SKIPPED ==\n" +
+      "   Needs SUPABASE_DB_URL. Run the schema first (npm run db:schema),\n" +
+      "   then set the connection string in .env and re-run.\n"
+  );
+  process.exit(0);
+}
+
 
 const REPO = __dirname;
 
@@ -212,6 +238,28 @@ function dispatchText(ctx) {
   return next();
 }
 
+/*
+| The reject reason is read by the second text handler (the one registered
+| for rejectFlow), not the first (adminFlow). Run them in registration order
+| with a real next(), so whichever handler owns the flow answers, exactly as
+| Telegraf would dispatch it.
+*/
+async function dispatchTextHandlers(ctx) {
+  for (const handler of registered.text) {
+    let delegated = false;
+
+    await handler(ctx, async () => {
+      delegated = true;
+    });
+
+    // A handler that delegates had nothing to do with this message; one that
+    // did not delegate answered it, so stop there.
+    if (!delegated) {
+      return;
+    }
+  }
+}
+
 const adminTextHandler = registered.text[0];
 const photoHandler = registered.photo[0];
 
@@ -224,11 +272,60 @@ function findNotification(method, chatId, needle) {
   );
 }
 
+/*
+| This test drives the real database, so it has to leave it as it found it.
+| A customer number that appears nowhere else and order numbers carrying
+| FLOWTEST are the whole footprint, and both are removed on the way out, so a
+| crash cannot leave rows for the next run to trip over. The cleanup runs
+| first too, so a run that crashed the last time still starts clean.
+*/
+async function cleanUp() {
+  if (!connection.shouldUseDatabase()) {
+    return;
+  }
+
+  const db = await connection.getDb().catch(() => null);
+
+  if (!db) {
+    return;
+  }
+
+  // One statement per call: node-postgres speaks the extended protocol,
+  // which cannot take several statements in one query, and a silently
+  // rejected multi-statement string would leave the rows behind.
+  const statements = [
+    "DELETE FROM wallet_transactions WHERE user_id = $1",
+    "DELETE FROM payments WHERE user_id = $1",
+    "DELETE FROM recharge_requests WHERE user_id = $1",
+    "DELETE FROM orders WHERE user_id = $1 OR order_number LIKE 'HG-FLOWTEST-%'",
+    // Last, because everything above references it. Without it the ledger is
+    // emptied but the cached balance row survives, and the next run starts
+    // with money the customer never had.
+    "DELETE FROM users WHERE telegram_id = $1",
+  ];
+
+  for (const statement of statements) {
+    await db.query(statement, [CUSTOMER_ID]).catch((error) => {
+      console.error("[WALLET FLOW TEST] cleanup failed:", error.message);
+    });
+  }
+}
+
 (async () => {
   console.log("WALLET FLOW TEST");
   console.log("================");
 
+  await cleanUp();
+
   await walletStore.hydrate();
+
+  /*
+  | The order mirror the wallet-payment screens read. The bot fills both
+  | mirrors at startup, so the test fills both too; without it every read
+  | refuses with "the order mirror is not loaded yet" and the payment
+  | screens cannot be checked.
+  */
+  await orders.hydrate();
 
   /*
   |--------------------------------------------------------------------------
@@ -245,29 +342,27 @@ function findNotification(method, chatId, needle) {
 
   check(
     "recharge starts the amount step",
-    ctx.session?.waitingForRechargeAmount === true &&
-      ctx.session?.rechargeFlow?.step === "amount",
+    ctx.session?.walletFlow?.step === "amount",
     JSON.stringify(ctx.session)
   );
   check(
     "amount prompt sent",
     ctx.sent.length === 1 &&
-      String(ctx.sent[0].text).includes("RECHARGE WALLET"),
+      String(ctx.sent[0].text).includes("RECHARGE"),
     ctx.sent[0]?.text
   );
 
   // The customer types an amount.
   ctx = makeCtx({ text: "1000" });
   ctx.session = {
-    rechargeFlow: { step: "amount" },
-    waitingForRechargeAmount: true,
+    walletFlow: { step: "amount" },
   };
   await dispatchText(ctx);
 
   check(
-    "valid amount moves to confirm",
-    ctx.session?.rechargeFlow?.step === "confirm" &&
-      ctx.session?.rechargeFlow?.amount === 1000,
+    "valid amount moves to method choice",
+    ctx.session?.walletFlow?.step === "method" &&
+      ctx.session?.walletFlow?.amount === 1000,
     JSON.stringify(ctx.session)
   );
   check(
@@ -280,35 +375,34 @@ function findNotification(method, chatId, needle) {
   // A nonsense amount is refused and the flow is kept.
   ctx = makeCtx({ text: "abc" });
   ctx.session = {
-    rechargeFlow: { step: "amount" },
-    waitingForRechargeAmount: true,
+    walletFlow: { step: "amount" },
   };
   await dispatchText(ctx);
 
   check(
     "non-numeric amount refused",
-    ctx.session?.waitingForRechargeAmount === true &&
-      String(ctx.sent[0].text).includes("NOT AN AMOUNT"),
+    ctx.session?.walletFlow?.step === "amount" &&
+      String(ctx.sent[0].text).includes("Invalid amount"),
     ctx.sent[0]?.text
   );
 
-  // The customer confirms the amount.
-  ctx = makeCtx({ callbackData: "recharge_confirm", isCallback: true });
+  // The customer picks a payment method.
+  ctx = makeCtx({ callbackData: "recharge_ez_cash", isCallback: true });
   ctx.session = {
-    rechargeFlow: { step: "confirm", amount: 1000 },
+    walletFlow: { step: "method", amount: 1000 },
   };
-  await tap(ctx, "recharge_confirm");
+  await tap(ctx, "recharge_ez_cash");
 
   check(
     "proof step opened",
-    ctx.session?.waitingForRechargeProof === true &&
-      ctx.session?.rechargeFlow?.step === "proof",
+    ctx.session?.walletFlow?.step === "proof" &&
+      ctx.session?.walletFlow?.method === "ez_cash",
     JSON.stringify(ctx.session)
   );
   check(
     "proof prompt sent",
     ctx.edited.length === 1 &&
-      String(ctx.edited[0].text).includes("PAYMENT PROOF"),
+      String(ctx.edited[0].text).includes("RECHARGE VIA"),
     ctx.edited[0]?.text
   );
 
@@ -316,11 +410,13 @@ function findNotification(method, chatId, needle) {
   const before = await wallet.getPendingRecharges();
 
   ctx = makeCtx({
-    photo: [{ file_id: "small" }, { file_id: "proof_large" }],
+    photo: [
+      { file_id: "small", file_path: "small.jpg" },
+      { file_id: "proof_large", file_path: "proof_large.jpg" },
+    ],
   });
   ctx.session = {
-    rechargeFlow: { step: "proof", amount: 1000 },
-    waitingForRechargeProof: true,
+    walletFlow: { step: "proof", method: "ez_cash", amount: 1000 },
   };
   await photoHandler(ctx);
 
@@ -337,14 +433,13 @@ function findNotification(method, chatId, needle) {
   check(
     "request carries the amount and proof",
     request.amount === 1000 &&
-      request.proof === "proof_large" &&
+      request.paymentProof.endsWith("/proof_large.jpg") &&
       request.status === "pending",
     JSON.stringify(request)
   );
   check(
     "flow cleared after the screenshot",
-    ctx.session?.waitingForRechargeProof === false &&
-      !ctx.session?.rechargeFlow,
+    ctx.session?.walletFlow === null,
     JSON.stringify(ctx.session)
   );
   check(
@@ -361,7 +456,7 @@ function findNotification(method, chatId, needle) {
   check(
     "customer told the request is waiting",
     ctx.sent.some((s) =>
-      String(s.text).includes("RECHARGE REQUEST SENT")
+      String(s.text).includes("RECHARGE REQUESTED")
     ),
     "no confirmation sent"
   );
@@ -406,7 +501,7 @@ function findNotification(method, chatId, needle) {
       findNotification(
         "sendMessage",
         CUSTOMER_ID,
-        "WALLET RECHARGED"
+        "RECHARGE APPROVED"
       )
     ),
     "no notification to the customer"
@@ -414,7 +509,7 @@ function findNotification(method, chatId, needle) {
   check(
     "admin screen shows the new balance",
     adminCtx.edited.length === 1 &&
-      String(adminCtx.edited[0].text).includes("CREDIT APPLIED"),
+      String(adminCtx.edited[0].text).includes("RECHARGE APPROVED"),
     adminCtx.edited[0]?.text
   );
 
@@ -493,28 +588,21 @@ function findNotification(method, chatId, needle) {
   );
   check(
     "order marked paid by wallet",
-    paidOrder.status === "pending_approval" &&
-      paidOrder.walletPayment === true,
-    `${paidOrder.status} / walletPayment ${paidOrder.walletPayment}`
+    paidOrder.status === "approved" &&
+      paidOrder.paymentMethod === "wallet" &&
+      Boolean(paidOrder.walletTransactionId),
+    `${paidOrder.status} / ${paidOrder.paymentMethod} / ${paidOrder.walletTransactionId}`
   );
   check(
     "customer sees the payment",
-    ctx.sent.some((s) =>
-      String(s.text).includes("PAID WITH WALLET")
+    ctx.edited.some((e) =>
+      String(e.text).includes("PAYMENT CONFIRMED")
     ),
     "no payment confirmation"
   );
   check(
-    "admin notified for fulfilment",
-    Boolean(
-      findNotification("sendMessage", ADMIN_ID, "WALLET PAYMENT")
-    ),
-    "no notice to the admin"
-  );
-  check(
     "session closed after payment",
-    ctx.session?.orderId == null &&
-      ctx.session?.waitingForPayment === false,
+    ctx.session?.waitingForPayment === false,
     JSON.stringify(ctx.session)
   );
 
@@ -533,7 +621,7 @@ function findNotification(method, chatId, needle) {
     "an already-paid order is not charged again",
     wallet.getBalance(CUSTOMER_ID) === 410 &&
       replayCtx.sent.some((s) =>
-        String(s.text).includes("not waiting for payment")
+        String(s.text).includes("not pending payment")
       ),
     `balance ${wallet.getBalance(CUSTOMER_ID)}`
   );
@@ -565,7 +653,7 @@ function findNotification(method, chatId, needle) {
   check(
     "an unaffordable order is refused",
     ctx.sent.some((s) =>
-      String(s.text).includes("WALLET PAYMENT FAILED")
+      String(s.text).includes("Payment failed")
     ),
     "no failure message"
   );
@@ -593,8 +681,7 @@ function findNotification(method, chatId, needle) {
     photo: [{ file_id: "small" }, { file_id: "proof_two" }],
   });
   ctx.session = {
-    rechargeFlow: { step: "proof", amount: 250 },
-    waitingForRechargeProof: true,
+    walletFlow: { step: "proof", method: "ez_cash", amount: 250 },
   };
   await photoHandler(ctx);
 
@@ -626,12 +713,11 @@ function findNotification(method, chatId, needle) {
     text: "screenshot does not match the amount",
   });
   reasonCtx.session = {
-    adminFlow: {
-      step: "wallet_reject_reason",
+    rejectFlow: {
       requestId: second.id,
     },
   };
-  await adminTextHandler(reasonCtx, async () => {});
+  await dispatchTextHandlers(reasonCtx);
 
   const rejected = await wallet.getRecharge(second.id);
 
@@ -674,7 +760,7 @@ function findNotification(method, chatId, needle) {
   check(
     "wallet screen shows the balance",
     ctx.edited.length === 1 &&
-      String(ctx.edited[0].text).includes("MY WALLET") &&
+      String(ctx.edited[0].text).includes("WALLET") &&
       String(ctx.edited[0].text).includes("410"),
     ctx.edited[0]?.text
   );
@@ -691,12 +777,15 @@ function findNotification(method, chatId, needle) {
     "admin recharge list renders",
     adminWalletsCtx.edited.length === 1 &&
       String(adminWalletsCtx.edited[0].text).includes(
-        "WALLET RECHARGES"
+        "PENDING RECHARGES"
       ),
     adminWalletsCtx.edited[0]?.text
   );
 
   console.log(`\n${pass} passed, ${fail} failed`);
 
-  process.exit(fail === 0 ? 0 : 1);
-})();
+  process.exitCode = fail === 0 ? 0 : 1;
+})().catch(async (error) => {
+  console.error("TEST CRASH:", error);
+  process.exitCode = 1;
+}).finally(cleanUp);

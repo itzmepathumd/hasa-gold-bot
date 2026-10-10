@@ -155,7 +155,13 @@ const shop2topupProvider = new Shop2TopupAdapter({
 });
 
 const nexauraTopupProvider = new NexauraTopupAdapter({
-  productionMode: true,
+  /*
+  | Deliberately opt-in. ==="true" rather than !=="false" means a
+  | missing variable, a typo, or an unset shell all fall back to test mode, so
+  | nothing can place a live top-up by accident. It used to be hardcoded true,
+  | which is how a verification run placed a real order and spent balance.
+  */
+  productionMode: process.env.NEXAURA_PRODUCTION_MODE === "true",
   resolveProduct: (order) => {
     if (!order?.gameId || !order?.productKey) {
       return null;
@@ -2276,14 +2282,21 @@ bot.on("text", async (ctx, next) => {
     );
   }
 
-  // Validate player with SHOP2TOPUP if sub_category_id is configured.
-  // stages() owns one message end to end: animate -> API call -> reveal,
-  // so the loader never survives as an orphan line above the result.
+  /*
+  | A check is skipped only when this game has nowhere to check. The old
+  | condition was does the package carry a sub_category_id, which is a
+  | SHOP2TOPUP requirement, so every Free Fire package without one silently
+  | skipped verification: the customer was sent straight to the order screen
+  | and the order was placed with an empty player name. Nexaura looks a player
+  | up by id alone, with no category, and free_fire validates there.
+  */
   const subCategoryId = pkg.sub_category_id;
+  const hasValidator = playerValidate.hasValidator(game.id);
+
   let playerInfo = null;
   let validationError = null;
 
-  if (subCategoryId) {
+  if (subCategoryId || hasValidator) {
     const { result } = await anim.stages(ctx, {
       title: "Checking Player ID",
       emoji: "🔍",
@@ -2783,11 +2796,143 @@ for (const mediaType of [
   });
 }
 
+/*
+|--------------------------------------------------------------------------
+| ORDER PAYMENT METHOD
+|--------------------------------------------------------------------------
+| "I HAVE PAID" used to answer with a popup and nothing else, so the customer
+| was left on the order screen with no way to say how they paid and no
+| instructions to follow. It now asks which method they used, shows that
+| method's details, and records the choice on the order, so the admin sees
+| which ledger the money came through when reviewing the screenshot.
+*/
 bot.action("payment_done", async (ctx) => {
-  await ctx.answerCbQuery(
+  await ctx.answerCbQuery().catch(() => {});
+
+  const orderId = ctx.session?.orderId;
+
+  if (!orderId) {
+    return ctx.reply(
+      "❌ *Order session expired*\n\n" +
+        "━━━━━━━━━━━━━━━━━━\n\n" +
+        "Please start a new order.",
+      { parse_mode: "Markdown", ...homeMenu() }
+    );
+  }
+
+  const order = getOrders().find((o) => o.id === orderId);
+
+  if (!order) {
+    return ctx.reply("❌ Order not found.");
+  }
+
+  if (order.status !== "pending_payment") {
+    return ctx.reply(
+      `⚠️ This order is not waiting for payment.
+
+Status: ${statusBadge(order.status)}`
+    );
+  }
+
+  const methods = activePayments();
+
+  if (methods.length === 0) {
+    return ctx.reply(
+      `⚠️ *PAYMENT UNAVAILABLE*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `No payment methods are currently\n` +
+        `enabled. Please contact support.`,
+      { parse_mode: "Markdown", ...supportMenu() }
+    );
+  }
+
+  const keyboard = methods
+    .slice(0, 8)
+    .map((method) => [
+      Markup.button.callback(
+        `${method.emoji}  ${method.title}`,
+        `order_pay_${method.method_code}`
+      ),
+    ]);
+
+  return ctx.reply(
+    `💳 *HOW DID YOU PAY?*\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `🧾 *ORDER ID*\n${code(order.id)}\n\n` +
+      `💰 *AMOUNT*\nLKR ${catalog.formatPrice(order.price)}\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `Pick the payment method you used.\n` +
+      `The payment details will be shown\n` +
+      `next, then send your screenshot.`,
     {
-      text: "📸 Now send the payment screenshot.",
-      show_alert: true,
+      parse_mode: "Markdown",
+      ...Markup.inlineKeyboard(keyboard),
+    }
+  );
+});
+
+bot.action(/^order_pay_(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+
+  const orderId = ctx.session?.orderId;
+
+  if (!orderId) {
+    return ctx.reply(
+      "❌ *Order session expired*\n\n" +
+        "━━━━━━━━━━━━━━━━━━\n\n" +
+        "Please start a new order.",
+      { parse_mode: "Markdown", ...homeMenu() }
+    );
+  }
+
+  const methodCode = ctx.match[1];
+  const method = catalog
+    .getPayments({ includePaused: true })
+    .find((m) => m.method_code === methodCode);
+
+  if (!method) {
+    return ctx.reply("❌ That payment method is not available.");
+  }
+
+  const applied = await mutateOrder(orderId, (current) => {
+    if (current.status !== "pending_payment") {
+      return false;
+    }
+
+    current.paymentMethod = methodCode;
+
+    return current;
+  });
+
+  if (!applied) {
+    return ctx.reply(
+      `⚠️ This order is not waiting for payment.
+
+Status: ${statusBadge(getOrders().find((o) => o.id === orderId)?.status || "unknown")}`
+    );
+  }
+
+  const lines = method.lines.length
+    ? method.lines.map((l) => `${l}`).join("\n")
+    : "_No details set_";
+
+  return ctx.reply(
+    `${method.emoji} *${method.title.toUpperCase()}*\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `${lines}\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `🧾 *ORDER ID*\n${code(orderId)}\n` +
+      `💰 *AMOUNT*\nLKR ${catalog.formatPrice(applied.price)}\n\n` +
+      `📸 *NOW SEND YOUR SCREENSHOT*\n\n` +
+      `Send a screenshot of the payment\n` +
+      `confirmation in this chat.\n\n` +
+      `⚡ The order is processed once an\n` +
+      `admin verifies the payment.`,
+    {
+      parse_mode: "Markdown",
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback("❌  CANCEL ORDER", "cancel_order")],
+      ]),
     }
   );
 });
@@ -4638,6 +4783,12 @@ function adminMenu() {
     ],
     [
       Markup.button.callback(
+        "🔋  NEXAURA BALANCE",
+        "admin_nexaura_balance"
+      ),
+    ],
+    [
+      Markup.button.callback(
         "📡  SYSTEM STATUS",
         "admin_status"
       ),
@@ -6016,6 +6167,71 @@ bot.action("admin_status_refresh", async (ctx) => {
 | WALLET
 |--------------------------------------------------------------------------
 */
+bot.action("admin_nexaura_balance", async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+
+  if (ctx.from.id !== ADMIN_ID) {
+    return ctx.reply("⛔ Admin access only.");
+  }
+
+  if (!nexaura.hasKey()) {
+    return ctx.reply(
+      `🔋 *NEXAURA BALANCE*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `⚠️ The Nexaura API key is not configured,\n` +
+        `so the balance cannot be read.`,
+      {
+        parse_mode: "Markdown",
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback("🔙  Admin Panel", "admin_home")],
+        ]),
+      }
+    );
+  }
+
+  const result = await nexaura.getBalance();
+
+  if (!result.ok) {
+    return ctx.reply(
+      `🔋 *NEXAURA BALANCE*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `⚠️ Could not read the balance.\n\n` +
+        `${esc(result.error || "Unknown error")}`,
+      {
+        parse_mode: "Markdown",
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback("🔙  Admin Panel", "admin_home")],
+        ]),
+      }
+    );
+  }
+
+  const products = await nexaura.fetchProducts();
+  const readyProducts =
+    products.ok && Array.isArray(products.products)
+      ? products.products.length
+      : 0;
+
+  return ctx.reply(
+    `🔋 *NEXAURA BALANCE*\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `💰 *BALANCE*\nLKR ${wallet.formatLKR(result.balance)}\n\n` +
+      `📦 *PRODUCTS AVAILABLE*\n${readyProducts}\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `This is the reseller wallet that Free\n` +
+      `Fire top-ups are placed against.\n\n` +
+      `A balance too low to cover an order\n` +
+      `fails the top-up and parks the order\n` +
+      `for review.`,
+    {
+      parse_mode: "Markdown",
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback("🔙  Admin Panel", "admin_home")],
+      ]),
+    }
+  );
+});
+
 bot.action("admin_wallets", async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
 
@@ -6507,9 +6723,140 @@ bot.action(/^admin_user_(\d+)$/, async (ctx) => {
     ...Markup.inlineKeyboard([
       [
         Markup.button.callback(
+          "📜  ACTIVITY HISTORY",
+          `admin_user_activity_${targetId}`
+        ),
+      ],
+      [
+        Markup.button.callback(
           "👥  ALL CUSTOMERS",
           "admin_users"
         ),
+      ],
+      [
+        Markup.button.callback("🔙  Admin Panel", "admin_home"),
+      ],
+    ]),
+  });
+});
+
+/*
+|--------------------------------------------------------------------------
+| CUSTOMER ACTIVITY HISTORY
+|--------------------------------------------------------------------------| One screen that answers "what has this customer actually done": orders,
+| wallet credits and debits, and recharge requests, newest first. The profile
+| above shows six orders; this is the whole timeline, which is what a disputed
+| payment is judged against.
+*/
+function activityText(userId, orders) {
+  const rows = [];
+
+  for (const order of orders.filter((o) => o.userId === userId)) {
+    rows.push({
+      at: order.createdAt,
+      mark: statusBadge(order.status),
+      text: `${code(order.id)} order\n${esc(order.productName || "—")}\nLKR ${analytics.money(order.price)}`,
+    });
+
+    if (order.approvedAt) {
+      rows.push({
+        at: order.approvedAt,
+        mark: "✅",
+        text: `${code(order.id)} approved`,
+      });
+    }
+
+    if (order.rejectedAt) {
+      rows.push({
+        at: order.rejectedAt,
+        mark: "❌",
+        text: `${code(order.id)} rejected${order.rejectReason ? `\n${esc(order.rejectReason)}` : ""}`,
+      });
+    }
+
+    if (order.topupCompletedAt) {
+      rows.push({
+        at: order.topupCompletedAt,
+        mark: order.topupStatus === "needs_review" ? "⚠️" : "⚡",
+        text: `${code(order.id)} top-up ${esc(order.topupStatus || "—")}`,
+      });
+    }
+  }
+
+  for (const tx of wallet.getHistory(userId, 200)) {
+    const credit = tx.type === "credit";
+    rows.push({
+      at: tx.createdAt,
+      mark: credit ? "➕" : "➖",
+      text: `${credit ? "+" : "-"}LKR ${wallet.formatLKR(tx.amount)}${tx.note ? `\n${esc(tx.note)}` : ""}`,
+    });
+  }
+
+  for (const request of wallet.getUserRecharges(userId, 200)) {
+    const stamp =
+      request.status === "approved"
+        ? request.approvedAt
+        : request.status === "rejected"
+          ? request.rejectedAt
+          : request.createdAt;
+
+    rows.push({
+      at: stamp,
+      mark: request.status === "approved" ? "✅" : request.status === "rejected" ? "❌" : "⏳",
+      text: `${code(request.id)} recharge ${esc(request.status)}\nLKR ${wallet.formatLKR(request.amount)} · ${esc(request.method || "—")}`,
+    });
+  }
+
+  rows.sort((a, b) => String(b.at || "").localeCompare(String(a.at || "")));
+
+  const shown = rows.slice(0, 20);
+
+  const counts = rows.reduce((acc, row) => {
+    acc[row.mark] = (acc[row.mark] || 0) + 1;
+    return acc;
+  }, {});
+
+  return (
+    `📜 ACTIVITY HISTORY\n\n` +
+    `━━━━━━━━━━━━━━━━━━\n\n` +
+    `👤 ${code(userId)}\n\n` +
+    `🧾 Events: ${rows.length}\n` +
+    `⏳ Pending: ${counts["⏳"] || 0}\n` +
+    `✅ Approved: ${counts["✅"] || 0}\n` +
+    `❌ Rejected: ${counts["❌"] || 0}\n` +
+    `⚡ Top-ups: ${counts["⚡"] || 0}\n` +
+    `⚠️ Reviews: ${counts["⚠️"] || 0}\n` +
+    `➕ Credits: ${counts["➕"] || 0}\n` +
+    `➖ Debits: ${counts["➖"] || 0}\n\n` +
+    `━━━━━━━━━━━━━━━━━━\n\n` +
+    `${shown.length ? shown.map((r) => `${r.mark} ${r.text}\n🕐 ${analytics.when(r.at)}`).join("\n\n") : "_No activity yet_"}` +
+    (rows.length > shown.length
+      ? `\n\n_${rows.length - shown.length} older event(s) not shown_`
+      : "")
+  );
+}
+
+bot.action(/^admin_user_activity_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+
+  if (ctx.from.id !== ADMIN_ID) {
+    return ctx.reply("⛔ Admin access only.");
+  }
+
+  const targetId = Number(ctx.match[1]);
+  const orders = getOrders();
+
+  await ctx.editMessageText(activityText(targetId, orders), {
+    parse_mode: "Markdown",
+    ...Markup.inlineKeyboard([
+      [
+        Markup.button.callback(
+          "👤  PROFILE",
+          `admin_user_${targetId}`
+        ),
+      ],
+      [
+        Markup.button.callback("👥  ALL CUSTOMERS", "admin_users"),
       ],
       [
         Markup.button.callback("🔙  Admin Panel", "admin_home"),

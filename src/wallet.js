@@ -516,6 +516,15 @@ async function getRecharge(requestId) {
   return store.getRecharge(requestId);
 }
 
+/*
+| Every recharge request this customer has filed, newest first. The activity
+| history screen needs the whole set: a disputed payment is judged against all
+| of them, not the handful still waiting.
+*/
+async function getUserRecharges(userId, limit = 200) {
+  return store.getUserRecharges(userId, limit);
+}
+
 async function approveRecharge(requestId, adminId) {
   return store.approveRecharge(requestId, adminId);
 }
@@ -551,6 +560,7 @@ module.exports = {
   hydrate,
   getPendingRecharges,
   getRecharge,
+  getUserRecharges,
   approveRecharge,
   rejectRecharge,
   rechargeAutoVerifyText,

@@ -395,7 +395,12 @@ async function fetchProducts() {
   }
 }
 
+function hasKey() {
+  return Boolean(API_KEY);
+}
+
 module.exports = {
+  hasKey,
   validatePlayer,
   verifyEzCashDeposit,
   getDepositStatus,

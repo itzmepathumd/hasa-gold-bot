@@ -379,8 +379,25 @@ async function validateNexauraPlayer(playerId) {
 | SHOP2TOPUP, and a player check should come from the supplier that will
 | actually deliver the order.
 */
+/*
+| Games this module knows how to check, and the supplier each uses. Free Fire
+| looks a player up by id alone, so it needs no category from the catalogue;
+| everything else goes through the supplier that will deliver the order.
+*/
+const GAME_VALIDATORS = {
+  free_fire: "nexaura",
+};
+
+function validatorFor(gameId) {
+  return GAME_VALIDATORS[String(gameId)] || "shop2topup";
+}
+
+function hasValidator(gameId) {
+  return Boolean(GAME_VALIDATORS[String(gameId)]);
+}
+
 async function validateGamePlayer(gameId, playerId, product) {
-  if (String(gameId) === "free_fire") {
+  if (validatorFor(gameId) === "nexaura") {
     return validateNexauraPlayer(playerId);
   }
 
@@ -394,6 +411,8 @@ async function validateGamePlayer(gameId, playerId, product) {
 */
 module.exports = {
   validateGamePlayer,
+  hasValidator,
+  validatorFor,
   validateNexauraPlayer,
   validateShop2TopupPlayer,
   fetchSubcategories,

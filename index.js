@@ -1317,7 +1317,16 @@ async function handleWalletFlow(ctx, text) {
     }
 
     const photo = ctx.message.photo[ctx.message.photo.length - 1];
-    const paymentProof = `https://api.telegram.org/file/bot${BOT_TOKEN}/${photo.file_path}`;
+
+    /*
+    | Store the file_id, not a URL. The old code built
+    | https://api.telegram.org/file/bot<TOKEN>/<path> and handed it back when
+    | the admin opened the proof; Telegram cannot fetch its own file endpoint,
+    | so every proof view failed with failed to get HTTP URL content. The
+    | file_id is the only handle Telegram accepts, it does not expire, and it
+    | does not carry the bot token in a chat log.
+    */
+    const paymentProof = photo.file_id;
 
     const result = await wallet.requestRecharge(
       ctx.from.id,
@@ -1555,358 +1564,33 @@ async function handleWalletFlow(ctx, text) {
       );
     }
 
-    if (verification.status === "pending") {
-      const result = await wallet.requestRecharge(
-        ctx.from.id,
-        wallet.MIN_RECHARGE,
-        "ez_cash_auto",
-        `pending_verify:${verification.depositId}`
-      );
-
-      if (!result.ok) {
-        return ctx.reply(
-          `❌ *Recharge request failed*\n\n` +
-            `━━━━━━━━━━━━━━━━━━\n\n` +
-            `${result.error}`,
-          {
-            parse_mode: "Markdown",
-            ...wallet.walletMenu(),
-          }
-        );
-      }
-
-      ensureSession(ctx).walletFlow = null;
-
-      return ctx.reply(
-        `⏳ *PAYMENT PENDING*\n\n` +
-          `━━━━━━━━━━━━━━━━━━\n\n` +
-          `Your payment is being verified.\n` +
-          `This may take a few minutes due to\nSMS delays.\n\n` +
-          `🔢 RN: ${rn}\n` +
-          `🆔 Deposit: ${verification.depositId}\n\n` +
-          `We will credit your wallet automatically\nonce verified.\n\n` +
-          `Use /wallet to check your balance.`,
-        {
-          parse_mode: "Markdown",
-          ...wallet.walletMenu(),
-        }
-      );
-    }
-
-    return ctx.reply(
-      `❌ *Unexpected verification status*\n\n` +
-        `━━━━━━━━━━━━━━━━━━\n\n` +
-        `Status: ${verification.status}\n\n` +
-        `Please contact support.`,
-      {
-        parse_mode: "Markdown",
-        ...wallet.walletMenu(),
-      }
-    );
-  }
-
-  if (flow.step === "rn") {
-    const rn = String(text || "").replace(/\s+/g, "");
-
-    if (!/^\d{14}$/.test(rn)) {
-      return ctx.reply(
-        `❌ *Invalid RN number*\n\n` +
-          `━━━━━━━━━━━━━━━━━━\n\n` +
-          `Send the *14-digit RN* from your\neZ Cash payment SMS.\n\n` +
-          `Example: 20261007123456`,
-        {
-          parse_mode: "Markdown",
-          ...cancelFlowButton(),
-        }
-      );
-    }
-
-    await ctx.reply(
-      `⏳ *Verifying payment...*\n\n` +
-        `━━━━━━━━━━━━━━━━━━\n\n` +
-        `Please wait while we verify your\neZ Cash RN: ${rn}`,
-      {
-        parse_mode: "Markdown",
-        ...cancelFlowButton(),
-      }
-    );
-
-    const verification = await nexaura.verifyEzCashDeposit(rn);
-
-    if (!verification.ok) {
-      return ctx.reply(
-        `❌ *Verification failed*\n\n` +
-          `━━━━━━━━━━━━━━━━━━\n\n` +
-          `${verification.error}\n\n` +
-          `Please check the RN and try again, or use /recharge.`,
-        {
-          parse_mode: "Markdown",
-          ...wallet.walletMenu(),
-        }
-      );
-    }
-
-    if (verification.status === "credited") {
-      /*
-      | Record the deposit before crediting anything, and refuse if this
-      | number was already credited. The RN is the only thing a customer
-      | controls, so without this a second attempt at the same RN would
-      | credit the same deposit twice.
-      */
-      let deposit = null;
-
-      try {
-        deposit = await payments.findProviderDeposit("nexaura", rn);
-      } catch (error) {
-        console.error(
-          `[PAYMENTS] Could not look up deposit ${rn}: ${error.message}`
-        );
-      }
-
-      if (!deposit) {
-        try {
-          const recorded = await payments.recordProviderDeposit({
-            provider: "nexaura",
-            referenceNumber: rn,
-            telegramId: ctx.from.id,
-            depositId: verification.depositId,
-            status: "verified",
-            amountLkr: verification.amount,
-          });
-
-          deposit = {
-            ...recorded,
-            userId: String(ctx.from.id),
-            depositId: verification.depositId,
-            status: recorded.ok ? recorded.status : "pending",
-            amountLkr: verification.amount,
-            creditedLkr: null,
-            walletTransactionId: null,
-            attempts: 1,
-          };
-        } catch (error) {
-          console.error(
-            `[PAYMENTS] Could not record deposit ${rn}: ${error.message}`
-          );
-        }
-      }
-
-      if (deposit && deposit.status === "credited") {
-        return ctx.reply(
-          `✅ *ALREADY CREDITED*\n\n` +
-            `━━━━━━━━━━━━━━━━━━\n\n` +
-            `This RN was already credited to a wallet.\n\n` +
-            `🔢 RN: ${rn}\n` +
-            `🆔 Deposit: ${deposit.depositId || verification.depositId}\n\n` +
-            `If you believe this is wrong, contact support\nwith the RN above.`,
-          {
-            parse_mode: "Markdown",
-            ...wallet.walletMenu(),
-          }
-        );
-      }
-
-      const result = await wallet.requestRecharge(
-        ctx.from.id,
-        verification.amount,
-        "ez_cash_auto",
-        `auto_verified:${verification.depositId}`
-      );
-
-      if (!result.ok) {
-        return ctx.reply(
-          `❌ *Recharge failed*\n\n` +
-            `━━━━━━━━━━━━━━━━━━\n\n` +
-            `${result.error}`,
-          {
-            parse_mode: "Markdown",
-            ...wallet.walletMenu(),
-          }
-        );
-      }
-
-      const approveResult = await wallet.approveRecharge(result.requestId, 0);
-
-      if (!approveResult.ok) {
-        return ctx.reply(
-          `⚠️ *Deposit verified but wallet credit failed*\n\n` +
-            `━━━━━━━━━━━━━━━━━━\n\n` +
-            `Please contact support with your RN: ${rn}\n\n` +
-            `Deposit ID: ${verification.depositId}`,
-          {
-            parse_mode: "Markdown",
-            ...wallet.walletMenu(),
-          }
-        );
-      }
-
-      // The credit is irreversible from here on, so the deposit is marked
-      // now: a retry finds this row and stops.
-      try {
-        await payments.markDepositCredited(
-          "nexaura",
-          rn,
-          approveResult.transactionId || 0,
-          verification.amount
-        );
-      } catch (error) {
-        console.error(
-          `[PAYMENTS] Could not mark deposit ${rn} as credited: ${error.message}`
-        );
-      }
-
-      ensureSession(ctx).walletFlow = null;
-
-      return ctx.reply(
-        `✅ *PAYMENT VERIFIED & CREDITED*\n\n` +
-          `━━━━━━━━━━━━━━━━━━\n\n` +
-          `💵 Amount: LKR ${wallet.formatLKR(verification.amount)}\n` +
-          `🔢 RN: ${rn}\n` +
-          `🆔 Deposit: ${verification.depositId}\n\n` +
-          `💰 New balance: LKR ${wallet.formatLKR(approveResult.balance)}\n\n` +
-          `Your wallet has been credited automatically.`,
-        {
-          parse_mode: "Markdown",
-          ...wallet.walletMenu(),
-        }
-      );
-    }
-
-    if (verification.status === "pending") {
-      const result = await wallet.requestRecharge(
-        ctx.from.id,
-        wallet.MIN_RECHARGE,
-        "ez_cash_auto",
-        `pending_verify:${verification.depositId}`
-      );
-
-      if (!result.ok) {
-        return ctx.reply(
-          `❌ *Recharge request failed*\n\n` +
-            `━━━━━━━━━━━━━━━━━━\n\n` +
-            `${result.error}`,
-          {
-            parse_mode: "Markdown",
-            ...wallet.walletMenu(),
-          }
-        );
-      }
-
-      ensureSession(ctx).walletFlow = null;
-
-      return ctx.reply(
-        `⏳ *PAYMENT PENDING*\n\n` +
-          `━━━━━━━━━━━━━━━━━━\n\n` +
-          `Your payment is being verified.\n` +
-          `This may take a few minutes due to\nSMS delays.\n\n` +
-          `🔢 RN: ${rn}\n` +
-          `🆔 Deposit: ${verification.depositId}\n\n` +
-          `We will credit your wallet automatically\nonce verified.\n\n` +
-          `Use /wallet to check your balance.`,
-        {
-          parse_mode: "Markdown",
-          ...wallet.walletMenu(),
-        }
-      );
-    }
-
-    return ctx.reply(
-      `❌ *Unexpected verification status*\n\n` +
-        `━━━━━━━━━━━━━━━━━━\n\n` +
-        `Status: ${verification.status}\n\n` +
-        `Please contact support.`,
-      {
-        parse_mode: "Markdown",
-        ...wallet.walletMenu(),
-      }
-    );
-  }
-
-  if (flow.step === "proof") {
-    if (!ctx.message.photo) {
-      return ctx.reply(
-        `❌ *Payment proof required*\n\n` +
-          `━━━━━━━━━━━━━━━━━━\n\n` +
-          `Send a screenshot of your ${wallet.METHODS[flow.method]?.label || "payment"}.\n\n` +
-          `The photo must show the amount and transaction ID.`,
-        {
-          parse_mode: "Markdown",
-          ...cancelFlowButton(),
-        }
-      );
-    }
-
-    const photo = ctx.message.photo[ctx.message.photo.length - 1];
-    const paymentProof = `https://api.telegram.org/file/bot${BOT_TOKEN}/${photo.file_path}`;
-
-    const result = await wallet.requestRecharge(
-      ctx.from.id,
-      flow.amount,
-      flow.method,
-      paymentProof
-    );
-
-    if (!result.ok) {
-      return ctx.reply(
-        `❌ *Recharge failed*\n\n` +
-          `━━━━━━━━━━━━━━━━━━\n\n` +
-          `${result.error}`,
-        {
-          parse_mode: "Markdown",
-          ...wallet.walletMenu(),
-        }
-      );
-    }
-
-    ensureSession(ctx).walletFlow = null;
-
     /*
-    | The shop cannot credit what it cannot see. A recharge request that
-    | nobody is told about waits for an approval that never starts, so the
-    | proof is forwarded to the admin with the approve and reject buttons
-    | attached, the same way an order payment is.
+    | An RN that the supplier will not confirm is rejected here, not parked.
+    |
+    | This branch used to file a recharge request at the minimum amount, which
+    | put every unconfirmed RN in front of the admin as "pending approval".
+    | A number typed wrong, or one for a payment that never happened, is not
+    | an approval decision: the customer should be told the RN is wrong and
+    | asked to check it, and nothing should reach the admin's queue for it.
     */
-    try {
-      await bot.telegram.sendPhoto(
-        ADMIN_ID,
-        photo[photo.length - 1].file_id,
-        {
-          caption:
-            `💰 *RECHARGE REQUEST*\n\n` +
-            `━━━━━━━━━━━━━━━━━━\n\n` +
-            `🧾 ${wallet.code(result.requestId)}\n` +
-            `👤 Customer: ${ctx.from.first_name || ""}\n` +
-            (ctx.from.username ? `📱 Username: @${esc(ctx.from.username)}\n` : "") +
-            `💳 Method: ${wallet.METHODS[flow.method]?.label || flow.method}\n` +
-            `💵 Amount: LKR ${wallet.formatLKR(flow.amount)}\n\n` +
-            `━━━━━━━━━━━━━━━━━━\n\n` +
-            `⏳ Status:\nAWAITING APPROVAL`,
-          parse_mode: "Markdown",
-          reply_markup: {
-            inline_keyboard: [
-              [
-                {
-                  text: "✅ APPROVE",
-                  callback_data: `wallet_approve_${result.requestId}`,
-                },
-                {
-                  text: "❌ REJECT",
-                  callback_data: `wallet_reject_${result.requestId}`,
-                },
-              ],
-            ],
-          },
-        }
-      );
-    } catch (error) {
-      console.error("[WALLET] Admin notice failed:", error);
-    }
-
-    return ctx.reply(wallet.rechargeSubmittedText({ ...flow, id: result.requestId }), {
-      parse_mode: "Markdown",
-      ...wallet.walletMenu(),
-    });
+    return ctx.reply(
+      `❌ *RN NOT VERIFIED*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `The RN you sent could not be verified:\n\n` +
+        `🔢 RN: ${code(rn)}\n\n` +
+        `This usually means the RN is mistyped or\n` +
+        `no matching eZ Cash payment was found.\n\n` +
+        `Please check the 14\u2011digit RN from your\n` +
+        `payment SMS and try again.\n\n` +
+        `Nothing has been added to your wallet.`,
+      {
+        parse_mode: "Markdown",
+        ...wallet.walletMenu(),
+      }
+    );
   }
+
+
 
   return ctx.reply(
     `❌ *Invalid step*\n\n` +
@@ -6406,7 +6090,43 @@ bot.action(/^wallet_proof_(.+)$/, async (ctx) => {
     );
   }
 
-  await ctx.replyWithPhoto(request.paymentProof, {
+  /*
+  | Older rows stored a bot-api URL, which Telegram cannot fetch, and those
+  | rows cannot be converted back to a file_id. Show the proof the bot can
+  | still reach, and for the rest say so plainly instead of raising: the review
+  | screen above already loaded, so a failure here would leave the admin with
+  | nothing at all.
+  */
+  const proof = String(request.paymentProof || "");
+
+  if (/^https?:\/\//.test(proof)) {
+    return ctx.reply(
+      `⚠️ *PROOF UNAVAILABLE*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `🧾 ${request.id}\n\n` +
+        `The screenshot for this request predates image\n` +
+        `storage by file id and can no longer be fetched\n` +
+        `by Telegram.\n\n` +
+        `The customer still holds the original SMS.`,
+      { parse_mode: "Markdown" }
+    );
+  }
+
+  if (proof.startsWith("auto_verified:") || proof.startsWith("pending_verify:")) {
+    const deposit = proof.replace(/^(auto_verified|pending_verify):/, "");
+
+    return ctx.reply(
+      `⚡ *AUTO\u2011VERIFIED — NO SCREENSHOT*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `🧾 ${request.id}\n` +
+        `🔢 RN deposit: ${code(deposit)}\n\n` +
+        `This request was verified through the eZ Cash\n` +
+        `RN, so no screenshot was attached.`,
+      { parse_mode: "Markdown" }
+    );
+  }
+
+  await ctx.replyWithPhoto(proof, {
     caption:
       `💰 PROOF FOR ${wallet.formatLKR(request.amount)}\n\n` +
       `🧾 ${request.id}\n` +
@@ -6444,7 +6164,13 @@ bot.action(/^wallet_approve_(.+)$/, async (ctx) => {
       Number(request.userId),
       `✅ *RECHARGE APPROVED*\n\n` +
         `━━━━━━━━━━━━━━━━━━\n\n` +
-        `💵 LKR ${wallet.formatLKR(result.amount || 0)} has been\n` +
+        /*
+        | The amount credited is read from the request, not from the approval
+        | result: approve_recharge returns ok, balance, transaction_id and
+        | error, and nothing else, so result.amount was always undefined and
+        | the customer was told "LKR 0 has been added" next to a real balance.
+        */
+        `💵 LKR ${wallet.formatLKR(request.amount)} has been\n` +
         `added to your wallet.\n\n` +
         `💰 New balance: LKR ${wallet.formatLKR(result.balance)}`,
       { parse_mode: "Markdown" }

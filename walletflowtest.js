@@ -411,8 +411,8 @@ async function cleanUp() {
 
   ctx = makeCtx({
     photo: [
-      { file_id: "small", file_path: "small.jpg" },
-      { file_id: "proof_large", file_path: "proof_large.jpg" },
+      { file_id: "AgACAgUAAxkBAAICsmallFileId", file_path: "small.jpg" },
+      { file_id: "AgACAgUAAxkBAAICproofLargeFileId", file_path: "proof_large.jpg" },
     ],
   });
   ctx.session = {
@@ -433,7 +433,7 @@ async function cleanUp() {
   check(
     "request carries the amount and proof",
     request.amount === 1000 &&
-      request.paymentProof.endsWith("/proof_large.jpg") &&
+      request.paymentProof === "AgACAgUAAxkBAAICproofLargeFileId" &&
       request.status === "pending",
     JSON.stringify(request)
   );
@@ -448,7 +448,7 @@ async function cleanUp() {
       (n) =>
         n.method === "sendPhoto" &&
         n.chatId === ADMIN_ID &&
-        n.fileId === "proof_large" &&
+        n.fileId === "AgACAgUAAxkBAAICproofLargeFileId" &&
         String(n.extra?.caption).includes("RECHARGE REQUEST")
     ),
     "no sendPhoto to the admin"

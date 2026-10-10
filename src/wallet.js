@@ -80,16 +80,34 @@ function validateRechargeAmount(amount) {
   return { ok: true, amount: num };
 }
 
+/*
+| Accept either a Telegram file_id (what the customer actually sends: a short
+| opaque string with no scheme) or the legacy bot-api URL still sitting in
+| older rows. The file_id is what has to be stored: Telegram refuses to fetch
+| its own file endpoint, and the URL also carries the bot token.
+*/
 function validatePaymentProof(proof) {
   if (!proof || typeof proof !== "string") {
     return { ok: false, error: "Please send a payment proof screenshot." };
   }
 
-  if (!proof.startsWith("https://") && !proof.startsWith("http://")) {
-    return { ok: false, error: "Payment proof must be a valid image URL." };
+  const trimmed = proof.trim();
+
+  if (trimmed.startsWith("https://") || trimmed.startsWith("http://")) {
+    return { ok: true, proof: trimmed };
   }
 
-  return { ok: true, proof };
+  // A file_id is one opaque token with no scheme and no whitespace. Telegram
+  // rejects anything that is not a file id it issued, so the bot passes it on
+  // and lets the supplier of the id be the judge rather than guessing a length.
+  if (/^[^\s:]+$/.test(trimmed) && !/:\/\//.test(trimmed)) {
+    return { ok: true, proof: trimmed };
+  }
+
+  return {
+    ok: false,
+    error: "Please send a payment proof screenshot.",
+  };
 }
 
 async function requestRecharge(userId, amount, method, paymentProof) {
@@ -326,8 +344,16 @@ function rechargeSubmittedText(request) {
   );
 }
 
+/*
+| Telegram's legacy Markdown treats _ * [ ] ( ) ~ ` > # + - = | { } . ! and \
+| as markup. A note or a username is customer text, not markup, so every one
+| of those is escaped on the way out. Leaving a single character unescaped
+| makes Telegram reject the entire message with "can't parse entities".
+*/
 function esc(str) {
-  return String(str || "").trim();
+  return String(str ?? "")
+    .trim()
+    .replace(/([_*[\]()~`>#+\-=|{}.!\\])/g, "\\$1");
 }
 
 /*
@@ -434,7 +460,10 @@ function rechargeReviewMenu(request) {
 }
 
 function code(str) {
-  return `\`${esc(str)}\``;
+  // A code span is literal: Telegram does not process backslash escapes
+  // inside backticks, so escaping here would leak the backslashes into the
+  // text. Backslashes themselves are removed instead.
+  return "`" + String(str ?? "").replace(/\\/g, "") + "`";
 }
 
 /*

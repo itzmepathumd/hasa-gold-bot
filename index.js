@@ -13,6 +13,7 @@ const { Shop2TopupAdapter } = require("./src/shop2topup");
 const wallet = require("./src/wallet");
 const payments = require("./src/database/payments");
 const nexaura = require("./src/database/nexaura");
+const { creditWallet } = require("./src/database/wallets");
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_ID = Number(process.env.ADMIN_ID);
@@ -4002,6 +4003,10 @@ Status: ${statusBadge(order.status)}`
   const rejectedAt = new Date().toISOString();
   const rejectReason = "Rejected by admin";
 
+  // Check if this was a wallet payment that needs refunding
+  const isWalletPayment = order.paymentMethod === "wallet" && order.walletTransactionId;
+  let walletRefund = null;
+
   const rejected = await mutateOrder(order.id, (current) => {
     if (current.status !== "pending_approval") {
       return false;
@@ -4021,6 +4026,24 @@ Status: ${statusBadge(order.status)}`
     return ctx.reply(
       "❌ This order could not be updated."
     );
+  }
+
+  // Refund wallet if this was a wallet payment
+  if (isWalletPayment) {
+    try {
+      walletRefund = await creditWallet(
+        order.userId,
+        order.price,
+        order.id,
+        "order_refund",
+        `Refund for rejected order ${order.id}`
+      );
+      if (!walletRefund.ok) {
+        console.error(`[WALLET-REFUND] Failed to refund order ${order.id}: ${walletRefund.error}`);
+      }
+    } catch (error) {
+      console.error(`[WALLET-REFUND] Error refunding order ${order.id}:`, error.message);
+    }
   }
 
   await editOrderNotice(
@@ -4050,11 +4073,17 @@ Status:
 ❌ REJECTED`
   );
 
+  // Notify customer with refund info if applicable
+  const customerBody = isWalletPayment && walletRefund?.ok
+    ? `Your payment was not approved, so the wallet amount has been refunded.\n\n` +
+      `✅ Refunded: LKR ${wallet.formatLKR(order.price)}\n` +
+      `💳 New wallet balance: LKR ${wallet.formatLKR(walletRefund.balance)}`
+    : `Your payment proof was not approved.\n\n` +
+      `If you believe this was a mistake, please contact ${STORE_NAME}.`;
+
   await notifyCustomer(order, {
     title: "❌ PAYMENT REJECTED",
-    body:
-      `Your payment proof was not approved.\n\n` +
-      `If you believe this was a mistake, please contact ${STORE_NAME}.`,
+    body: customerBody,
   });
 });
 

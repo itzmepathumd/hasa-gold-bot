@@ -574,6 +574,26 @@ async function rejectRecharge(requestId, adminId, reason = null) {
   }
 }
 
+async function adjustWallet(userId, amount, adminId, reason, type = "credit") {
+  if (!usingDatabase()) {
+    return { ok: false, error: "Supabase is not available" };
+  }
+
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return { ok: false, error: "Amount must be greater than zero" };
+  }
+
+  if (!reason || String(reason).trim().length === 0) {
+    return { ok: false, error: "Reason is required" };
+  }
+
+  const refId = `admin_${adminId}_${Date.now()}`;
+  const refType = "admin_adjustment";
+  const note = `Admin ${type}: ${reason}`;
+
+  return moveWallet(userId, amount, type, refId, refType, note);
+}
+
 module.exports = {
   WALLETS,
   TRANSACTIONS,
@@ -598,4 +618,5 @@ module.exports = {
   approveRecharge,
   rejectRecharge,
   getPendingRecharges,
+  adjustWallet,
 };

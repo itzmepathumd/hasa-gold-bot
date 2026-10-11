@@ -375,6 +375,7 @@ function pendingRechargesMenu(pending) {
     ),
   ]);
 
+  buttons.push([Markup.button.callback("➕  ADJUST BALANCE", "admin_wallet_adjust")]);
   buttons.push([Markup.button.callback("👑  ADMIN PANEL", "admin_home")]);
 
   return Markup.inlineKeyboard(buttons);
@@ -495,6 +496,10 @@ async function rejectRecharge(requestId, adminId, reason = null) {
   return store.rejectRecharge(requestId, adminId, reason);
 }
 
+async function adjustWallet(userId, amount, adminId, reason, type = "credit") {
+  return store.adjustWallet(userId, amount, adminId, reason, type);
+}
+
 module.exports = {
   METHODS,
   MIN_RECHARGE,
@@ -524,6 +529,7 @@ module.exports = {
   getRecharge,
   approveRecharge,
   rejectRecharge,
+  adjustWallet,
   rechargeAutoVerifyText,
   rechargeAutoVerifyMenu,
   Markup,

@@ -1617,6 +1617,190 @@ async function handleWalletFlow(ctx, text) {
     }
   );
 }
+
+/*
+|--------------------------------------------------------------------------
+| ADMIN WALLET ADJUST FLOW
+|--------------------------------------------------------------------------
+*/
+async function handleAdminWalletAdjust(ctx, text) {
+  const flow = ensureSession(ctx).adminWalletAdjust;
+
+  if (!flow) {
+    return ctx.reply(wallet.pendingRechargesText(await wallet.getPendingRecharges()), {
+      parse_mode: "Markdown",
+      ...wallet.pendingRechargesMenu(await wallet.getPendingRecharges()),
+    });
+  }
+
+  // Step 1: Get User ID
+  if (flow.step === "user_id") {
+    const userId = text.trim();
+
+    if (!/^\d+$/.test(userId)) {
+      return ctx.reply(
+        `❌ *Invalid User ID*\n\n` +
+          `━━━━━━━━━━━━━━━━━━\n\n` +
+          `Please enter a numeric Telegram User ID.`,
+        {
+          parse_mode: "Markdown",
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback("❌  CANCEL", "admin_wallets")],
+          ]),
+        }
+      );
+    }
+
+    // Check if user exists
+    const user = await wallet.getWallet(userId);
+    if (!user) {
+      return ctx.reply(
+        `❌ *User not found*\n\n` +
+          `━━━━━━━━━━━━━━━━━━\n\n` +
+          `No wallet found for user ID: ${code(userId)}.\n\n` +
+          `The user must have used the bot before.`,
+        {
+          parse_mode: "Markdown",
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback("❌  CANCEL", "admin_wallets")],
+          ]),
+        }
+      );
+    }
+
+    flow.userId = userId;
+    flow.userName = user.username || user.firstName || "Unknown";
+    flow.currentBalance = user.balance;
+    flow.step = "type";
+
+    return ctx.reply(
+      `➕ *ADMIN: ADJUST WALLET BALANCE*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `👤 User: ${esc(flow.userName)} (${code(flow.userId)})\n` +
+        `💰 Current Balance: LKR ${wallet.formatLKR(flow.currentBalance)}\n\n` +
+        `Step 2 of 4: Choose *credit* (add) or *debit* (deduct).`,
+      {
+        parse_mode: "Markdown",
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback("➕  CREDIT (Add)", "admin_wallet_adjust_type_credit")],
+          [Markup.button.callback("➖  DEBIT (Deduct)", "admin_wallet_adjust_type_debit")],
+          [Markup.button.callback("❌  CANCEL", "admin_wallets")],
+        ]),
+      }
+    );
+  }
+
+  // Step 2: Get Amount
+  if (flow.step === "amount") {
+    const amount = Number(text.replace(/[^0-9.]/g, ""));
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return ctx.reply(
+        `❌ *Invalid amount*\n\n` +
+          `━━━━━━━━━━━━━━━━━━\n\n` +
+          `Please enter a valid amount in LKR.`,
+        {
+          parse_mode: "Markdown",
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback("❌  CANCEL", "admin_wallets")],
+          ]),
+        }
+      );
+    }
+
+    if (flow.type === "debit" && amount > flow.currentBalance) {
+      return ctx.reply(
+        `❌ *Insufficient balance*\n\n` +
+          `━━━━━━━━━━━━━━━━━━\n\n` +
+          `Cannot debit LKR ${wallet.formatLKR(amount)}.\n` +
+          `Current balance: LKR ${wallet.formatLKR(flow.currentBalance)}.`,
+        {
+          parse_mode: "Markdown",
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback("❌  CANCEL", "admin_wallets")],
+          ]),
+        }
+      );
+    }
+
+    flow.amount = amount;
+    flow.step = "reason";
+
+    return ctx.reply(
+      `➕ *ADMIN: ADJUST WALLET BALANCE*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `👤 User: ${esc(flow.userName)} (${code(flow.userId)})\n` +
+        `💰 Current Balance: LKR ${wallet.formatLKR(flow.currentBalance)}\n` +
+        `🔧 Type: ${flow.type === "credit" ? "➕ CREDIT" : "➖ DEBIT"}\n` +
+        `💵 Amount: LKR ${wallet.formatLKR(flow.amount)}\n\n` +
+        `Step 3 of 4: Enter a *reason* for this adjustment.`,
+      {
+        parse_mode: "Markdown",
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback("❌  CANCEL", "admin_wallets")],
+        ]),
+      }
+    );
+  }
+
+  // Step 3: Get Reason
+  if (flow.step === "reason") {
+    const reason = text.trim();
+
+    if (!reason || reason.length < 3) {
+      return ctx.reply(
+        `❌ *Reason too short*\n\n` +
+          `━━━━━━━━━━━━━━━━━━\n\n` +
+          `Please enter a reason (at least 3 characters).`,
+        {
+          parse_mode: "Markdown",
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback("❌  CANCEL", "admin_wallets")],
+          ]),
+        }
+      );
+    }
+
+    flow.reason = reason;
+    flow.step = "confirm";
+
+    const newBalance = flow.type === "credit"
+      ? flow.currentBalance + flow.amount
+      : flow.currentBalance - flow.amount;
+
+    return ctx.reply(
+      `⚠️ *CONFIRM WALLET ADJUSTMENT*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `👤 User: ${esc(flow.userName)} (${code(flow.userId)})\n` +
+        `🔧 Type: ${flow.type === "credit" ? "➕ CREDIT" : "➖ DEBIT"}\n` +
+        `💵 Amount: LKR ${wallet.formatLKR(flow.amount)}\n` +
+        `💰 Current Balance: LKR ${wallet.formatLKR(flow.currentBalance)}\n` +
+        `💳 New Balance: LKR ${wallet.formatLKR(newBalance)}\n` +
+        `📝 Reason: ${esc(reason)}\n\n` +
+        `Are you sure?`,
+      {
+        parse_mode: "Markdown",
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback("✅  CONFIRM", "admin_wallet_adjust_confirm")],
+          [Markup.button.callback("❌  CANCEL", "admin_wallets")],
+        ]),
+      }
+    );
+  }
+
+  return ctx.reply(
+    `❌ *Invalid step*\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `Use the admin panel to start again.`,
+    {
+      parse_mode: "Markdown",
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback("💰  PENDING RECHARGES", "admin_wallets")],
+      ]),
+    }
+  );
+}
+
 /*
 |--------------------------------------------------------------------------
 | ADMIN TEXT FLOWS
@@ -6084,6 +6268,142 @@ bot.action("admin_wallets", async (ctx) => {
   });
 });
 
+bot.action("admin_wallet_adjust", async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+
+  if (ctx.from.id !== ADMIN_ID) {
+    return ctx.reply("⛔ Admin access only.");
+  }
+
+  ensureSession(ctx).adminWalletAdjust = { step: "user_id" };
+
+  await ctx.editMessageText(
+    `➕ *ADMIN: ADJUST WALLET BALANCE*\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `Step 1 of 4: Enter the *Telegram User ID*\nof the customer.\n\n` +
+      `_You can find this in their profile or\nfrom a recent order/recharge._`,
+    {
+      parse_mode: "Markdown",
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback("❌  CANCEL", "admin_wallets")],
+      ]),
+    }
+  );
+});
+
+bot.action(/^admin_wallet_adjust_type_(credit|debit)$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+
+  if (ctx.from.id !== ADMIN_ID) {
+    return ctx.reply("⛔ Admin access only.");
+  }
+
+  const type = ctx.match[1];
+  const flow = ensureSession(ctx).adminWalletAdjust;
+
+  if (!flow || flow.step !== "type") {
+    return ctx.reply("❌ Invalid step. Start again from admin panel.", {
+      ...Markup.inlineKeyboard([[Markup.button.callback("💰  PENDING RECHARGES", "admin_wallets")]]),
+    });
+  }
+
+  flow.type = type;
+  flow.step = "amount";
+
+  await ctx.editMessageText(
+    `➕ *ADMIN: ADJUST WALLET BALANCE*\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `👤 User: ${esc(flow.userName)} (${code(flow.userId)})\n` +
+      `💰 Current Balance: LKR ${wallet.formatLKR(flow.currentBalance)}\n` +
+      `🔧 Type: ${type === "credit" ? "➕ CREDIT" : "➖ DEBIT"}\n\n` +
+      `Step 3 of 4: Enter the *amount* in LKR.`,
+    {
+      parse_mode: "Markdown",
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback("❌  CANCEL", "admin_wallets")],
+      ]),
+    }
+  );
+});
+
+bot.action("admin_wallet_adjust_confirm", async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+
+  if (ctx.from.id !== ADMIN_ID) {
+    return ctx.reply("⛔ Admin access only.");
+  }
+
+  const flow = ensureSession(ctx).adminWalletAdjust;
+
+  if (!flow || flow.step !== "confirm") {
+    return ctx.reply("❌ Invalid step. Start again from admin panel.", {
+      ...Markup.inlineKeyboard([[Markup.button.callback("💰  PENDING RECHARGES", "admin_wallets")]]),
+    });
+  }
+
+  const result = await wallet.adjustWallet(
+    flow.userId,
+    flow.amount,
+    ctx.from.id,
+    flow.reason,
+    flow.type
+  );
+
+  ensureSession(ctx).adminWalletAdjust = null;
+
+  if (!result.ok) {
+    return ctx.editMessageText(
+      `❌ *ADJUSTMENT FAILED*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `${result.error}`,
+      {
+        parse_mode: "Markdown",
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback("💰  PENDING RECHARGES", "admin_wallets")],
+        ]),
+      }
+    );
+  }
+
+  const action = flow.type === "credit" ? "CREDITED" : "DEBITED";
+
+  await ctx.editMessageText(
+    `✅ *WALLET ${action}*\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `👤 User: ${esc(flow.userName)} (${code(flow.userId)})\n` +
+      `🔧 Type: ${flow.type === "credit" ? "➕ CREDIT" : "➖ DEBIT"}\n` +
+      `💵 Amount: LKR ${wallet.formatLKR(flow.amount)}\n` +
+      `📝 Reason: ${esc(flow.reason)}\n\n` +
+      `💰 Previous Balance: LKR ${wallet.formatLKR(flow.currentBalance)}\n` +
+      `💳 New Balance: LKR ${wallet.formatLKR(result.balance)}\n` +
+      `🆔 Transaction: ${result.transactionId}`,
+    {
+      parse_mode: "Markdown",
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback("💰  PENDING RECHARGES", "admin_wallets")],
+      ]),
+    }
+  );
+
+  // Notify the user
+  try {
+    const actionText = flow.type === "credit" ? "credited" : "debited";
+    await bot.telegram.sendMessage(
+      Number(flow.userId),
+      `💳 *WALLET ${actionText.toUpperCase()}*\n\n` +
+        `━━━━━━━━━━━━━━━━━━\n\n` +
+        `Your wallet has been ${actionText} by admin.\n\n` +
+        `🔧 Type: ${flow.type === "credit" ? "➕ CREDIT" : "➖ DEBIT"}\n` +
+        `💵 Amount: LKR ${wallet.formatLKR(flow.amount)}\n` +
+        `📝 Reason: ${esc(flow.reason)}\n\n` +
+        `💳 New Balance: LKR ${wallet.formatLKR(result.balance)}`,
+      { parse_mode: "Markdown" }
+    );
+  } catch (error) {
+    console.error(`[ADMIN-ADJUST] Failed to notify user ${flow.userId}:`, error.message);
+  }
+});
+
 bot.action(/^wallet_recharge_(.+)$/, async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
 
@@ -7257,6 +7577,10 @@ bot.on("text", async (ctx) => {
 
   if (ctx.session?.walletFlow) {
     return handleWalletFlow(ctx, raw);
+  }
+
+  if (ctx.from.id === ADMIN_ID && ctx.session?.adminWalletAdjust) {
+    return handleAdminWalletAdjust(ctx, raw);
   }
 
   if (target === "home") {

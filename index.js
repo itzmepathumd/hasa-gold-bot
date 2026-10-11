@@ -1529,36 +1529,22 @@ async function handleWalletFlow(ctx, text) {
     }
 
     if (verification.status === "pending") {
-      const result = await wallet.requestRecharge(
-        ctx.from.id,
-        wallet.MIN_RECHARGE,
-        "ez_cash_auto",
-        `pending_verify:${verification.depositId}`
-      );
-
-      if (!result.ok) {
-        return ctx.reply(
-          `❌ *Recharge request failed*\n\n` +
-            `━━━━━━━━━━━━━━━━━━\n\n` +
-            `${result.error}`,
-          {
-            parse_mode: "Markdown",
-            ...wallet.walletMenu(),
-          }
-        );
-      }
-
+      // Don't create a recharge request yet. The API accepted the RN but the
+      // payment is still being processed (SMS delay). The user should wait
+      // and check back, or we'll auto-check on next attempt.
       ensureSession(ctx).walletFlow = null;
 
       return ctx.reply(
-        `⏳ *PAYMENT PENDING*\n\n` +
+        `⏳ *PAYMENT PENDING VERIFICATION*\n\n` +
           `━━━━━━━━━━━━━━━━━━\n\n` +
-          `Your payment is being verified.\n` +
-          `This may take a few minutes due to\nSMS delays.\n\n` +
+          `Your RN was accepted but the payment is still\n` +
+          `being processed. This can take a few minutes\ndue to SMS delays.\n\n` +
           `🔢 RN: ${rn}\n` +
           `🆔 Deposit: ${verification.depositId}\n\n` +
-          `We will credit your wallet automatically\nonce verified.\n\n` +
-          `Use /wallet to check your balance.`,
+          `⚠️ No wallet credit yet. The amount will be\n` +
+          `credited automatically once verified.\n\n` +
+          `Use /wallet to check balance, or re-enter the\n` +
+          `same RN in a few minutes to check again.`,
         {
           parse_mode: "Markdown",
           ...wallet.walletMenu(),

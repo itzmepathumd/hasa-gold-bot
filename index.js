@@ -14,6 +14,7 @@ const wallet = require("./src/wallet");
 const payments = require("./src/database/payments");
 const nexaura = require("./src/database/nexaura");
 const { creditWallet } = require("./src/database/wallets");
+const { recordFailure, resetAttempts, getStatus, formatRemainingMs } = require("./src/rnBlock");
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_ID = Number(process.env.ADMIN_ID);
@@ -1314,14 +1315,44 @@ async function handleWalletFlow(ctx, text) {
   }
 
   if (flow.step === "rn") {
+    const blockStatus = getStatus(ctx.from.id);
+    if (blockStatus.blocked) {
+      return ctx.reply(
+        `🚫 *Too many failed attempts*\n\n` +
+          `━━━━━━━━━━━━━━━━━━\n\n` +
+          `You have been temporarily blocked from entering RN numbers.\n\n` +
+          `⏳ Try again in: *${formatRemainingMs(blockStatus.remainingMs)}*\n\n` +
+          `This block will expire automatically.`,
+        {
+          parse_mode: "Markdown",
+          ...wallet.walletMenu(),
+        }
+      );
+    }
+
     const rn = String(text || "").replace(/\s+/g, "");
 
     if (!/^\d{14}$/.test(rn)) {
+      const result = recordFailure(ctx.from.id);
+      if (result.blocked) {
+        return ctx.reply(
+          `🚫 *Too many failed attempts*\n\n` +
+            `━━━━━━━━━━━━━━━━━━\n\n` +
+            `You have entered 4 invalid RN numbers.\n\n` +
+            `⏳ Try again in: *${formatRemainingMs(result.remainingMs)}*\n\n` +
+            `This block will expire automatically.`,
+          {
+            parse_mode: "Markdown",
+            ...wallet.walletMenu(),
+          }
+        );
+      }
       return ctx.reply(
         `❌ *Invalid RN number*\n\n` +
           `━━━━━━━━━━━━━━━━━━\n\n` +
           `Send the *14-digit RN* from your\neZ Cash payment SMS.\n\n` +
-          `Example: 20261007123456`,
+          `Example: 20261007123456\n\n` +
+          `⚠️ ${result.attemptsLeft} attempt(s) left before temporary block.`,
         {
           parse_mode: "Markdown",
           ...cancelFlowButton(),
@@ -1342,17 +1373,34 @@ async function handleWalletFlow(ctx, text) {
     const verification = await nexaura.verifyEzCashDeposit(rn);
 
     if (!verification.ok) {
+      const result = recordFailure(ctx.from.id);
+      if (result.blocked) {
+        return ctx.reply(
+          `🚫 *Too many failed attempts*\n\n` +
+            `━━━━━━━━━━━━━━━━━━\n\n` +
+            `You have entered 4 invalid RN numbers.\n\n` +
+            `⏳ Try again in: *${formatRemainingMs(result.remainingMs)}*\n\n` +
+            `This block will expire automatically.`,
+          {
+            parse_mode: "Markdown",
+            ...wallet.walletMenu(),
+          }
+        );
+      }
       return ctx.reply(
         `❌ *Verification failed*\n\n` +
           `━━━━━━━━━━━━━━━━━━\n\n` +
           `${verification.error}\n\n` +
-          `Please check the RN and try again, or use /recharge.`,
+          `Please check the RN and try again, or use /recharge.\n\n` +
+          `⚠️ ${result.attemptsLeft} attempt(s) left before temporary block.`,
         {
           parse_mode: "Markdown",
           ...wallet.walletMenu(),
         }
       );
     }
+
+    resetAttempts(ctx.from.id);
 
     if (verification.status === "credited") {
       /*
@@ -4473,6 +4521,17 @@ bot.action(/^review_fail_(.+)$/, async (ctx) => {
 
   const orderId = ctx.match[1];
 
+  // Fetch order first to check wallet payment
+  const order = getOrders().find((o) => o.id === orderId);
+
+  if (!order) {
+    return ctx.reply("❌ Order not found.");
+  }
+
+  // Check if this was a wallet payment that needs refunding
+  const isWalletPayment = order.paymentMethod === "wallet" && order.walletTransactionId;
+  let walletRefund = null;
+
   const applied = await mutateOrder(orderId, (current) => {
     current.topupStatus = "topup_failed";
     current.status = "topup_failed";
@@ -4488,14 +4547,37 @@ bot.action(/^review_fail_(.+)$/, async (ctx) => {
     return ctx.reply("❌ Order could not be updated.");
   }
 
+  // Refund wallet if this was a wallet payment
+  if (isWalletPayment) {
+    try {
+      walletRefund = await creditWallet(
+        order.userId,
+        order.price,
+        order.id,
+        "order_refund",
+        `Refund for failed top-up order ${order.id}`
+      );
+      if (!walletRefund.ok) {
+        console.error(`[WALLET-REFUND] Failed to refund order ${order.id}: ${walletRefund.error}`);
+      }
+    } catch (error) {
+      console.error(`[WALLET-REFUND] Error refunding order ${order.id}:`, error.message);
+    }
+  }
+
   await notifyTopupResult(applied, "failed");
+
+  const refundInfo = isWalletPayment && walletRefund?.ok
+    ? `\n✅ Wallet refunded: LKR ${wallet.formatLKR(order.price)}\n💳 New balance: LKR ${wallet.formatLKR(walletRefund.balance)}`
+    : "";
 
   await ctx.editMessageText(
     `❌ *MARKED FAILED*\n\n` +
       `━━━━━━━━━━━━━━━━━━\n\n` +
-      `🧾 ${code(applied.id)}\n\n` +
-      `The customer has been asked to contact support\n` +
-      `for a refund.`,
+      `🧾 ${code(applied.id)}${refundInfo}\n\n` +
+      (isWalletPayment && walletRefund?.ok
+        ? `Wallet has been automatically refunded.`
+        : `The customer has been asked to contact support\nfor a refund.`),
     {
       parse_mode: "Markdown",
       ...Markup.inlineKeyboard([
